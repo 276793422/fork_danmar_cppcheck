@@ -1,6 +1,6 @@
 ---
 title: Cppcheck .cfg format
-subtitle: Version 1.90 dev
+subtitle: Version 2.16.99
 author: Cppcheck team
 lang: en
 documentclass: report
@@ -89,7 +89,7 @@ If instead `dostuff` takes care of the memory then this can be configured with:
       </memory>
     </def>
 
-The `<use>` configuration has no logical purpose. You will get the same warnings without it. Use it to silence --check-library information messages.
+The `<use>` configuration has no logical purpose. You will get the same warnings without it. Use it to silence `--check-library` information messages.
 
 # Function behavior
 
@@ -156,24 +156,39 @@ If you provide a configuration file then Cppcheck detects the bug:
     Checking uninit.c...
     [uninit.c:5]: (error) Uninitialized variable: buffer2
 
-Note that this implies for pointers that the memory they point at has to be initialized, too.
+Below windows.cfg is shown:
 
-Here is the minimal windows.cfg:
+Version 1:
 
     <?xml version="1.0"?>
     <def>
       <function name="CopyMemory">
         <arg nr="1"/>
         <arg nr="2">
+          <not-null/>
           <not-uninit/>
         </arg>
         <arg nr="3"/>
       </function>
     </def>
 
-The `indirect` attribute can be set to control the indirection of uninitialized memory allowed. Setting `indirect` to `0` means no uninitialized memory is allowed. Setting it to `1` allows a pointer to uninitialized memory. Setting it to `2` allows a pointer to pointer to uninitialized memory.
+Version 2:
 
-By default, cppcheck will use an indirect value of `0` unless `not-null` is used. When `not-null` is used, then `indirect` will default to `1`. 
+    <?xml version="1.0"?>
+    <def>
+      <function name="CopyMemory">
+        <arg nr="1"/>
+        <arg nr="2">
+          <not-uninit indirect="2"/>
+        </arg>
+        <arg nr="3"/>
+      </function>
+    </def>
+
+
+Version 1: If `indirect` attribute is not used then the level of indirection is determined automatically. The `<not-null/>` tells Cppcheck that the pointer must be initialized. The `<not-uninit/>` tells Cppcheck to check 1 extra level. This configuration means that both the pointer and the data must be initialized.
+
+Version 2: The `indirect` attribute can be set to explicitly control the level of indirection used in checking. Setting `indirect` to `0` means no uninitialized memory is allowed. Setting it to `1` allows a pointer to uninitialized memory. Setting it to `2` allows a pointer to pointer to uninitialized memory.
 
 ### Null pointers
 
@@ -248,6 +263,21 @@ printf - format string follows the printf rules
 
 scanf - format string follows the scanf rules
 
+### Container inputs
+
+If this is a free function for containers(like for `std::size` or `std::erase_if`) then the `<container>` tag can be used to specify the `yield` or `action`. Here is an example of `std::size`:
+
+    <function name="std::size">
+        <noreturn>false</noreturn>
+        <use-retval/>
+        <leak-ignore/>
+        <container yields="size"/>
+        <returnValue type="size_t"/>
+        <arg nr="1" direction="in">
+            <not-uninit/>
+        </arg>
+    </function>
+
 ### Value range
 
 The valid values can be defined. Imagine:
@@ -287,6 +317,7 @@ Some example expressions you can use in the valid element:
 0:  =>  all values that are greater or equal to 0 are valid
 0,2:32  =>  the value 0 and all values between 2 and 32 are valid
 -1.5:5.6  =>  all values between -1.5 and 5.6 are valid
+!0.0  =>  all values are accepted, except 0.0
 
 ### `<minsize>`
 
@@ -366,9 +397,9 @@ In theory, if ZeroMemory terminates the program then there is no bug. Cppcheck t
     $ cppcheck noreturn.c
     Checking noreturn.c...
 
-However if you use `--check-library` and `--enable=information` you'll get this:
+However if you use `--check-library` you'll get this:
 
-    $ cppcheck --check-library --enable=information noreturn.c
+    $ cppcheck --check-library noreturn.c
     Checking noreturn.c...
     [noreturn.c:7]: (information) --check-library: Function ZeroMemory() should have <noreturn> configuration
 
@@ -549,6 +580,8 @@ The size of the type is specified in bytes. Possible values for the "sign" attri
 A lot of C++ libraries, among those the STL itself, provide containers with very similar functionality. Libraries can be used to tell cppcheck about their behaviour. Each container needs a unique ID. It can optionally have a startPattern, which must be a valid Token::Match pattern and an endPattern that is compared to the linked token of the first token with such a link. The optional attribute "inherits" takes an ID from a previously defined container.
 
 The `hasInitializerListConstructor` attribute can be set when the container has a constructor taking an initializer list.
+
+The `view` attribute can be set when the container is a view, which means it borrows the lifetime of another container.
 
 Inside the `<container>` tag, functions can be defined inside of the tags `<size>`, `<access>` and `<other>` (on your choice). Each of them can specify an action like "resize" and/or the result it yields, for example "end-iterator".
 

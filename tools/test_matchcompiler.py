@@ -1,7 +1,7 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Cppcheck - A tool for static C/C++ code analysis
-# Copyright (C) 2007-2017 Cppcheck team.
+# Copyright (C) 2007-2021 Cppcheck team.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -39,6 +39,10 @@ class MatchCompilerTest(unittest.TestCase):
         output = self.mc._replaceTokenMatch(input, 0, "foo.cpp")
         self.assertEqual(output, 'if (match1(tok)) {')
 
+        input = 'if (Token::simpleMatch(tok, "foobar")) {'
+        output = self.mc._replaceTokenMatch(input, 0, "foo.cpp")
+        self.assertEqual(output, 'if (match1(tok)) {')
+
         input = 'if (Token::Match(tok->next()->next(), "foobar %type% %num%")) {'
         output = self.mc._replaceTokenMatch(input, 0, "foo.cpp")
         self.assertEqual(output, 'if (match2(tok->next()->next())) {')
@@ -59,6 +63,25 @@ class MatchCompilerTest(unittest.TestCase):
         output = self.mc._replaceTokenMatch(input, 0, "foo.cpp")
         self.assertEqual(
             output, 'if (Token::Match(tok, "extern \"C\" " + varname)) {')
+
+        # test that multiple patterns on the same line are replaced
+        input = 'if (Token::Match(tok, "foo") && Token::Match(tok->next(), "baz")) {'
+        output = self.mc._replaceTokenMatch(input, 0, "foo.cpp")
+        self.assertEqual(output, 'if (match4(tok) && match5(tok->next())) {')
+
+        # test that second pattern is replaced, even if there is a bailout on the first pattern
+        input = 'if (Token::Match(tok, foo) && Token::Match(tok->next(), "foobaz")) {'
+        output = self.mc._replaceTokenMatch(input, 0, "foo.cpp")
+        self.assertEqual(output, 'if (Token::Match(tok, foo) && match6(tok->next())) {')
+
+        # test mixing Match and simpleMatch on the same line
+        input = 'if (Token::Match(tok, "a") && Token::simpleMatch(tok->next(), "b")) {'
+        output = self.mc._replaceTokenMatch(input, 0, "foo.cpp")
+        self.assertEqual(output, 'if (match7(tok) && match8(tok->next())) {')
+
+        input = 'if (Token::simpleMatch(tok, "a") && Token::Match(tok->next(), "b")) {'
+        output = self.mc._replaceTokenMatch(input, 0, "foo.cpp")
+        self.assertEqual(output, 'if (match7(tok) && match8(tok->next())) {')
 
     def test_replaceTokenMatchWithVarId(self):
         input = 'if (Token::Match(tok, "foobar %varid%", 123)) {'
@@ -167,6 +190,11 @@ class MatchCompilerTest(unittest.TestCase):
         self.assertEqual(
             'if (match16(parent->tokAt(-3)) && tok->strAt(1) == MatchCompiler::makeConstString(")"))',
             output)
+
+    def test_parseMatchSkipComments(self):
+        input = '// TODO: suggest Token::exactMatch() for Token::simpleMatch() when pattern contains no whitespaces'
+        output = self.mc._replaceTokenMatch(input, 0, "foo.cpp")
+        self.assertEqual(output, '// TODO: suggest Token::exactMatch() for Token::simpleMatch() when pattern contains no whitespaces')
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -24,14 +24,21 @@
 
 #include "check.h"
 #include "config.h"
-#include "errorlogger.h"
 #include "mathlib.h"
+#include "errortypes.h"
 
+#include <set>
 #include <string>
 
 class Settings;
 class Token;
+class ErrorLogger;
+class ValueType;
 class Tokenizer;
+
+namespace ValueFlow {
+    class Value;
+}
 
 /// @addtogroup Checks
 /// @{
@@ -43,41 +50,25 @@ class Tokenizer;
 class CPPCHECKLIB CheckCondition : public Check {
 public:
     /** This constructor is used when registering the CheckAssignIf */
-    CheckCondition() : Check(myName()) {
-    }
+    CheckCondition() : Check(myName()) {}
 
+private:
     /** This constructor is used when running checks. */
     CheckCondition(const Tokenizer *tokenizer, const Settings *settings, ErrorLogger *errorLogger)
-        : Check(myName(), tokenizer, settings, errorLogger) {
-    }
+        : Check(myName(), tokenizer, settings, errorLogger) {}
 
-    void runChecks(const Tokenizer *tokenizer, const Settings *settings, ErrorLogger *errorLogger) OVERRIDE {
-        CheckCondition checkCondition(tokenizer, settings, errorLogger);
-        checkCondition.multiCondition();
-        checkCondition.clarifyCondition();   // not simplified because ifAssign
-        checkCondition.multiCondition2();
-        checkCondition.checkIncorrectLogicOperator();
-        checkCondition.checkInvalidTestForOverflow();
-        checkCondition.duplicateCondition();
-        checkCondition.checkPointerAdditionResultNotNull();
-        checkCondition.checkDuplicateConditionalAssign();
-        checkCondition.assignIf();
-        checkCondition.alwaysTrueFalse();
-        checkCondition.checkBadBitmaskCheck();
-        checkCondition.comparison();
-        checkCondition.checkModuloAlwaysTrueFalse();
-    }
+    void runChecks(const Tokenizer &tokenizer, ErrorLogger *errorLogger) override;
 
     /** mismatching assignment / comparison */
     void assignIf();
 
     /** parse scopes recursively */
-    bool assignIfParseScope(const Token * const assignTok,
-                            const Token * const startTok,
-                            const nonneg int varid,
-                            const bool islocal,
-                            const char bitop,
-                            const MathLib::bigint num);
+    bool assignIfParseScope(const Token * assignTok,
+                            const Token * startTok,
+                            nonneg int varid,
+                            bool islocal,
+                            char bitop,
+                            MathLib::bigint num);
 
     /** check bitmask using | instead of & */
     void checkBadBitmaskCheck();
@@ -118,15 +109,17 @@ public:
 
     void checkDuplicateConditionalAssign();
 
-private:
+    /** @brief Assignment in condition */
+    void checkAssignmentInCondition();
+
     // The conditions that have been diagnosed
     std::set<const Token*> mCondDiags;
     bool diag(const Token* tok, bool insert=true);
     bool isAliased(const std::set<int> &vars) const;
-    bool isOverlappingCond(const Token * const cond1, const Token * const cond2, bool pure) const;
+    bool isOverlappingCond(const Token * cond1, const Token * cond2, bool pure) const;
     void assignIfError(const Token *tok1, const Token *tok2, const std::string &condition, bool result);
-    void mismatchingBitAndError(const Token *tok1, const MathLib::bigint num1, const Token *tok2, const MathLib::bigint num2);
-    void badBitmaskCheckError(const Token *tok);
+    void mismatchingBitAndError(const Token *tok1, MathLib::bigint num1, const Token *tok2, MathLib::bigint num2);
+    void badBitmaskCheckError(const Token *tok, bool isNoOp = false);
     void comparisonError(const Token *tok,
                          const std::string &bitop,
                          MathLib::bigint value1,
@@ -150,42 +143,25 @@ private:
 
     void clarifyConditionError(const Token *tok, bool assign, bool boolop);
 
-    void alwaysTrueFalseError(const Token *tok, const ValueFlow::Value *value);
+    void alwaysTrueFalseError(const Token* tok, const Token* condition, const ValueFlow::Value* value);
 
-    void invalidTestForOverflow(const Token* tok, bool result);
+    void invalidTestForOverflow(const Token* tok, const ValueType *valueType, const std::string &replace);
     void pointerAdditionResultNotNullError(const Token *tok, const Token *calc);
 
-    void duplicateConditionalAssignError(const Token *condTok, const Token* assignTok);
+    void duplicateConditionalAssignError(const Token *condTok, const Token* assignTok, bool isRedundant = false);
 
-    void getErrorMessages(ErrorLogger *errorLogger, const Settings *settings) const OVERRIDE {
-        CheckCondition c(nullptr, settings, errorLogger);
+    void assignmentInCondition(const Token *eq);
 
-        ErrorPath errorPath;
+    void checkCompareValueOutOfTypeRange();
+    void compareValueOutOfTypeRangeError(const Token *comparison, const std::string &type, MathLib::bigint value, bool result);
 
-        c.assignIfError(nullptr, nullptr, emptyString, false);
-        c.badBitmaskCheckError(nullptr);
-        c.comparisonError(nullptr, "&", 6, "==", 1, false);
-        c.duplicateConditionError(nullptr, nullptr, errorPath);
-        c.overlappingElseIfConditionError(nullptr, 1);
-        c.mismatchingBitAndError(nullptr, 0xf0, nullptr, 1);
-        c.oppositeInnerConditionError(nullptr, nullptr, errorPath);
-        c.identicalInnerConditionError(nullptr, nullptr, errorPath);
-        c.identicalConditionAfterEarlyExitError(nullptr, nullptr, errorPath);
-        c.incorrectLogicOperatorError(nullptr, "foo > 3 && foo < 4", true, false, errorPath);
-        c.redundantConditionError(nullptr, "If x > 11 the condition x > 10 is always true.", false);
-        c.moduloAlwaysTrueFalseError(nullptr, "1");
-        c.clarifyConditionError(nullptr, true, false);
-        c.alwaysTrueFalseError(nullptr, nullptr);
-        c.invalidTestForOverflow(nullptr, false);
-        c.pointerAdditionResultNotNullError(nullptr, nullptr);
-        c.duplicateConditionalAssignError(nullptr, nullptr);
-    }
+    void getErrorMessages(ErrorLogger *errorLogger, const Settings *settings) const override;
 
     static std::string myName() {
         return "Condition";
     }
 
-    std::string classInfo() const OVERRIDE {
+    std::string classInfo() const override {
         return "Match conditions with assignments and other conditions:\n"
                "- Mismatching assignment and comparison => comparison is always true/false\n"
                "- Mismatching lhs and rhs in comparison => comparison is always true/false\n"
@@ -199,7 +175,8 @@ private:
                "- Mutual exclusion over || always evaluating to true\n"
                "- Comparisons of modulo results that are always true/false.\n"
                "- Known variable values => condition is always true/false\n"
-               "- Invalid test for overflow (for example 'ptr+u < ptr'). Condition is always false unless there is overflow, and overflow is undefined behaviour.\n";
+               "- Invalid test for overflow. Some mainstream compilers remove such overflow tests when optimising code.\n"
+               "- Suspicious assignment of container/iterator in condition => condition is always true.\n";
     }
 };
 /// @}

@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2017 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,20 +19,20 @@
 #ifndef XML_REPORT_H
 #define XML_REPORT_H
 
-#include <QString>
-#include <QList>
 #include "report.h"
 
+#include <QString>
+#include <QList>
+
 class ErrorItem;
-class QObject;
 
 /// @addtogroup GUI
 /// @{
 
 
 /**
-* @brief Base class for XML report classes.
-*/
+ * @brief Base class for XML report classes.
+ */
 class XmlReport : public Report {
 public:
     explicit XmlReport(const QString &filename);

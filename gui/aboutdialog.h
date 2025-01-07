@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,18 +20,21 @@
 #define ABOUT_DIALOG_H
 
 #include <QDialog>
+#include <QObject>
 #include <QString>
-#include "ui_about.h"
 
 class QWidget;
+namespace Ui {
+    class About;
+}
 
 /// @addtogroup GUI
 /// @{
 
 /**
-* @brief About dialog
-*
-*/
+ * @brief About dialog
+ *
+ */
 class AboutDialog : public QDialog {
     Q_OBJECT
 public:
@@ -39,8 +42,10 @@ public:
                 const QString &extraVersion,
                 QWidget *parent = nullptr);
 
+    ~AboutDialog() override;
+
 private:
-    Ui::About mUI;
+    Ui::About* mUI;
 };
 /// @}
 #endif // ABOUT_DIALOG_H

@@ -1,6 +1,6 @@
 /*
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,32 +19,57 @@
 #include "token.h"
 
 #include "astutils.h"
-#include "errorlogger.h"
+#include "errortypes.h"
 #include "library.h"
 #include "settings.h"
+#include "simplecpp.h"
 #include "symboldatabase.h"
+#include "tokenlist.h"
 #include "utils.h"
+#include "tokenrange.h"
+#include "valueflow.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cctype>
+#include <climits>
+#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <set>
+#include <sstream>
 #include <stack>
+#include <type_traits>
+#include <unordered_set>
 #include <utility>
+
+namespace {
+    struct less {
+        template<class T, class U>
+        bool operator()(const T &x, const U &y) const {
+            return x < y;
+        }
+    };
+}
 
 const std::list<ValueFlow::Value> TokenImpl::mEmptyValueList;
 
-Token::Token(TokensFrontBack *tokensFrontBack) :
-    mTokensFrontBack(tokensFrontBack),
-    mNext(nullptr),
-    mPrevious(nullptr),
-    mLink(nullptr),
-    mTokType(eNone),
-    mFlags(0)
+Token::Token(TokensFrontBack &tokensFrontBack)
+    : mTokensFrontBack(tokensFrontBack)
+    , mIsC(mTokensFrontBack.list.isC())
+    , mIsCpp(mTokensFrontBack.list.isCPP())
 {
     mImpl = new TokenImpl();
+}
+
+Token::Token(const Token* tok)
+    : Token(const_cast<Token*>(tok)->mTokensFrontBack)
+{
+    fileIndex(tok->fileIndex());
+    linenr(tok->linenr());
 }
 
 Token::~Token()
@@ -52,7 +77,18 @@ Token::~Token()
     delete mImpl;
 }
 
-static const std::set<std::string> controlFlowKeywords = {
+/*
+ * Get a TokenRange which starts at this token and contains every token following it in order up to but not including 't'
+ * e.g. for the sequence of tokens A B C D E, C.until(E) would yield the Range C D
+ * note t can be nullptr to iterate all the way to the end.
+ */
+// cppcheck-suppress unusedFunction // only used in testtokenrange.cpp
+ConstTokenRange Token::until(const Token* t) const
+{
+    return ConstTokenRange(this, t);
+}
+
+static const std::unordered_set<std::string> controlFlowKeywords = {
     "goto",
     "do",
     "if",
@@ -69,23 +105,33 @@ static const std::set<std::string> controlFlowKeywords = {
 void Token::update_property_info()
 {
     setFlag(fIsControlFlowKeyword, controlFlowKeywords.find(mStr) != controlFlowKeywords.end());
+    isStandardType(false);
 
     if (!mStr.empty()) {
         if (mStr == "true" || mStr == "false")
             tokType(eBoolean);
-        else if (isStringLiteral(mStr))
+        else if (isStringLiteral(mStr)) {
             tokType(eString);
-        else if (isCharLiteral(mStr))
+            isLong(isPrefixStringCharLiteral(mStr, '"', "L"));
+        }
+        else if (isCharLiteral(mStr)) {
             tokType(eChar);
+            isLong(isPrefixStringCharLiteral(mStr, '\'', "L"));
+        }
         else if (std::isalpha((unsigned char)mStr[0]) || mStr[0] == '_' || mStr[0] == '$') { // Name
             if (mImpl->mVarId)
                 tokType(eVariable);
+            else if (mTokensFrontBack.list.isKeyword(mStr) || mStr == "asm") // TODO: not a keyword
+                tokType(eKeyword);
             else if (mTokType != eVariable && mTokType != eFunction && mTokType != eType && mTokType != eKeyword)
                 tokType(eName);
-        } else if (std::isdigit((unsigned char)mStr[0]) || (mStr.length() > 1 && mStr[0] == '-' && std::isdigit((unsigned char)mStr[1])))
-            tokType(eNumber);
-        else if (mStr == "=" || mStr == "<<=" || mStr == ">>=" ||
-                 (mStr.size() == 2U && mStr[1] == '=' && std::strchr("+-*/%&^|", mStr[0])))
+        } else if (simplecpp::Token::isNumberLike(mStr)) {
+            if ((MathLib::isInt(mStr) || MathLib::isFloat(mStr)) && mStr.find('_') == std::string::npos)
+                tokType(eNumber);
+            else
+                tokType(eName); // assume it is a user defined literal
+        } else if (mStr == "=" || mStr == "<<=" || mStr == ">>=" ||
+                   (mStr.size() == 2U && mStr[1] == '=' && std::strchr("+-*/%&^|", mStr[0])))
             tokType(eAssignmentOp);
         else if (mStr.size() == 1 && mStr.find_first_of(",[]()?:") != std::string::npos)
             tokType(eExtendedOp);
@@ -101,10 +147,12 @@ void Token::update_property_info()
         else if (mStr.size() <= 2 && !mLink &&
                  (mStr == "==" ||
                   mStr == "!=" ||
-                  mStr == "<"  ||
+                  mStr == "<" ||
                   mStr == "<=" ||
-                  mStr == ">"  ||
+                  mStr == ">" ||
                   mStr == ">="))
+            tokType(eComparisonOp);
+        else if (mStr == "<=>")
             tokType(eComparisonOp);
         else if (mStr.size() == 2 &&
                  (mStr == "++" ||
@@ -116,63 +164,56 @@ void Token::update_property_info()
             tokType(eEllipsis);
         else
             tokType(eOther);
+
+        update_property_isStandardType();
     } else {
         tokType(eNone);
     }
-
-    update_property_char_string_literal();
-    update_property_isStandardType();
 }
 
-static const std::set<std::string> stdTypes = { "bool"
-                                                , "_Bool"
-                                                , "char"
-                                                , "double"
-                                                , "float"
-                                                , "int"
-                                                , "long"
-                                                , "short"
-                                                , "size_t"
-                                                , "void"
-                                                , "wchar_t"
-                                              };
+static const std::unordered_set<std::string> stdTypes = { "bool"
+                                                          , "_Bool"
+                                                          , "char"
+                                                          , "double"
+                                                          , "float"
+                                                          , "int"
+                                                          , "long"
+                                                          , "short"
+                                                          , "size_t"
+                                                          , "void"
+                                                          , "wchar_t"
+                                                          , "signed"
+                                                          , "unsigned"
+};
+
+bool Token::isStandardType(const std::string& str)
+{
+    return stdTypes.find(str) != stdTypes.end();
+}
 
 void Token::update_property_isStandardType()
 {
-    isStandardType(false);
-
-    if (mStr.size() < 3)
+    if (mStr.size() < 3 || mStr.size() > 7)
         return;
 
-    if (stdTypes.find(mStr)!=stdTypes.end()) {
+    if (isStandardType(mStr)) {
         isStandardType(true);
         tokType(eType);
     }
-}
-
-void Token::update_property_char_string_literal()
-{
-    if (mTokType != Token::eString && mTokType != Token::eChar)
-        return;
-
-    isLong(((mTokType == Token::eString) && isPrefixStringCharLiteral(mStr, '"', "L")) ||
-           ((mTokType == Token::eChar) && isPrefixStringCharLiteral(mStr, '\'', "L")));
 }
 
 bool Token::isUpperCaseName() const
 {
     if (!isName())
         return false;
-    for (char i : mStr) {
-        if (std::islower(i))
-            return false;
-    }
-    return true;
+    return std::none_of(mStr.begin(), mStr.end(), [](char c) {
+        return std::islower(c);
+    });
 }
 
 void Token::concatStr(std::string const& b)
 {
-    mStr.erase(mStr.length() - 1);
+    mStr.pop_back();
     mStr.append(getStringLiteral(b) + "\"");
 
     if (isCChar() && isStringLiteral(b) && b[0] != '"') {
@@ -219,8 +260,8 @@ void Token::deleteNext(nonneg int count)
 
     if (mNext)
         mNext->previous(this);
-    else if (mTokensFrontBack)
-        mTokensFrontBack->back = this;
+    else
+        mTokensFrontBack.back = this;
 }
 
 void Token::deletePrevious(nonneg int count)
@@ -239,8 +280,8 @@ void Token::deletePrevious(nonneg int count)
 
     if (mPrevious)
         mPrevious->next(this);
-    else if (mTokensFrontBack)
-        mTokensFrontBack->front = this;
+    else
+        mTokensFrontBack.front = this;
 }
 
 void Token::swapWithNext()
@@ -250,13 +291,17 @@ void Token::swapWithNext()
         std::swap(mTokType, mNext->mTokType);
         std::swap(mFlags, mNext->mFlags);
         std::swap(mImpl, mNext->mImpl);
-        for (auto *templateSimplifierPointer : mImpl->mTemplateSimplifierPointers) {
-            templateSimplifierPointer->token(this);
-        }
+        if (mImpl->mTemplateSimplifierPointers)
+            // cppcheck-suppress shadowFunction - TODO: fix this
+            for (auto *templateSimplifierPointer : *mImpl->mTemplateSimplifierPointers) {
+                templateSimplifierPointer->token(this);
+            }
 
-        for (auto *templateSimplifierPointer : mNext->mImpl->mTemplateSimplifierPointers) {
-            templateSimplifierPointer->token(mNext);
-        }
+        if (mNext->mImpl->mTemplateSimplifierPointers)
+            // cppcheck-suppress shadowFunction - TODO: fix this
+            for (auto *templateSimplifierPointer : *mNext->mImpl->mTemplateSimplifierPointers) {
+                templateSimplifierPointer->token(mNext);
+            }
         if (mNext->mLink)
             mNext->mLink->mLink = this;
         if (this->mLink)
@@ -273,9 +318,11 @@ void Token::takeData(Token *fromToken)
     delete mImpl;
     mImpl = fromToken->mImpl;
     fromToken->mImpl = nullptr;
-    for (auto *templateSimplifierPointer : mImpl->mTemplateSimplifierPointers) {
-        templateSimplifierPointer->token(this);
-    }
+    if (mImpl->mTemplateSimplifierPointers)
+        // cppcheck-suppress shadowFunction - TODO: fix this
+        for (auto *templateSimplifierPointer : *mImpl->mTemplateSimplifierPointers) {
+            templateSimplifierPointer->token(this);
+        }
     mLink = fromToken->mLink;
     if (mLink)
         mLink->link(this);
@@ -287,18 +334,14 @@ void Token::deleteThis()
         takeData(mNext);
         mNext->link(nullptr); // mark as unlinked
         deleteNext();
-    } else if (mPrevious && mPrevious->mPrevious) { // Copy previous to this and delete previous
+    } else if (mPrevious) { // Copy previous to this and delete previous
         takeData(mPrevious);
-
-        Token* toDelete = mPrevious;
-        mPrevious = mPrevious->mPrevious;
-        mPrevious->mNext = this;
-
-        delete toDelete;
+        mPrevious->link(nullptr);
+        deletePrevious();
     } else {
         // We are the last token in the list, we can't delete
         // ourselves, so just make us empty
-        str("");
+        str(";");
     }
 }
 
@@ -321,10 +364,10 @@ void Token::replace(Token *replaceThis, Token *start, Token *end)
     start->previous(replaceThis->previous());
     end->next(replaceThis->next());
 
-    if (end->mTokensFrontBack && end->mTokensFrontBack->back == end) {
+    if (end->mTokensFrontBack.back == end) {
         while (end->next())
             end = end->next();
-        end->mTokensFrontBack->back = end;
+        end->mTokensFrontBack.back = end;
     }
 
     // Update mProgressValue, fileIndex and linenr
@@ -335,48 +378,17 @@ void Token::replace(Token *replaceThis, Token *start, Token *end)
     delete replaceThis;
 }
 
-const Token *Token::tokAt(int index) const
-{
-    const Token *tok = this;
-    while (index > 0 && tok) {
-        tok = tok->next();
-        --index;
-    }
-    while (index < 0 && tok) {
-        tok = tok->previous();
-        ++index;
-    }
-    return tok;
-}
-
-const Token *Token::linkAt(int index) const
-{
-    const Token *tok = this->tokAt(index);
-    if (!tok) {
-        throw InternalError(this, "Internal error. Token::linkAt called with index outside the tokens range.");
-    }
-    return tok->link();
-}
-
-const std::string &Token::strAt(int index) const
-{
-    const Token *tok = this->tokAt(index);
-    return tok ? tok->mStr : emptyString;
-}
-
-static int multiComparePercent(const Token *tok, const char*& haystack, nonneg int varid)
+static
+#if defined(__GNUC__)
+// GCC does not inline this by itself
+// need to use the old syntax since the C++11 [[xxx:always_inline]] cannot be used here
+inline __attribute__((always_inline))
+#endif
+int multiComparePercent(const Token *tok, const char*& haystack, nonneg int varid)
 {
     ++haystack;
     // Compare only the first character of the string for optimization reasons
     switch (haystack[0]) {
-    case '\0':
-    case ' ':
-    case '|':
-        //simple '%' character
-        haystack += 1;
-        if (tok->isArithmeticalOp() && tok->str() == "%")
-            return 1;
-        break;
     case 'v':
         if (haystack[3] == '%') { // %var%
             haystack += 4;
@@ -397,7 +409,7 @@ static int multiComparePercent(const Token *tok, const char*& haystack, nonneg i
         // Type (%type%)
     {
         haystack += 5;
-        if (tok->isName() && tok->varId() == 0 && !tok->isKeyword())
+        if (tok->isName() && tok->varId() == 0)
             return 1;
     }
     break;
@@ -407,11 +419,11 @@ static int multiComparePercent(const Token *tok, const char*& haystack, nonneg i
         if (haystack[3] == '%') { // %any%
             haystack += 4;
             return 1;
-        } else { // %assign%
-            haystack += 7;
-            if (tok->isAssignmentOp())
-                return 1;
         }
+        // %assign%
+        haystack += 7;
+        if (tok->isAssignmentOp())
+            return 1;
     }
     break;
     case 'n':
@@ -504,7 +516,12 @@ static int multiComparePercent(const Token *tok, const char*& haystack, nonneg i
     return 0xFFFF;
 }
 
-int Token::multiCompare(const Token *tok, const char *haystack, nonneg int varid)
+static
+#if defined(__GNUC__)
+// need to use the old syntax since the C++11 [[xxx:always_inline]] cannot be used here
+inline __attribute__((always_inline))
+#endif
+int multiCompareImpl(const Token *tok, const char *haystack, nonneg int varid)
 {
     const char *needle = tok->str().c_str();
     const char *needlePointer = needle;
@@ -538,11 +555,14 @@ int Token::multiCompare(const Token *tok, const char *haystack, nonneg int varid
 
             do {
                 ++haystack;
-            } while (*haystack != ' ' && *haystack != '|' && *haystack);
 
-            if (*haystack == ' ' || *haystack == '\0') {
-                return -1;
-            }
+                if (*haystack == ' ' || *haystack == '\0') {
+                    return -1;
+                }
+                if (*haystack == '|') {
+                    break;
+                }
+            } while (true);
 
             ++haystack;
         }
@@ -554,26 +574,34 @@ int Token::multiCompare(const Token *tok, const char *haystack, nonneg int varid
     return -1;
 }
 
-bool Token::simpleMatch(const Token *tok, const char pattern[])
+// cppcheck-suppress unusedFunction - used in tests only
+int Token::multiCompare(const Token *tok, const char *haystack, nonneg int varid)
+{
+    return multiCompareImpl(tok, haystack, varid);
+}
+
+bool Token::simpleMatch(const Token *tok, const char pattern[], size_t pattern_len)
 {
     if (!tok)
         return false; // shortcut
-    const char *current  = pattern;
-    const char *next = std::strchr(pattern, ' ');
+    const char *current = pattern;
+    const char *end = pattern + pattern_len;
+    // cppcheck-suppress shadowFunction - TODO: fix this
+    const char *next = static_cast<const char*>(std::memchr(pattern, ' ', pattern_len));
     if (!next)
-        next = pattern + std::strlen(pattern);
+        next = end;
 
     while (*current) {
         const std::size_t length = next - current;
 
-        if (!tok || length != tok->mStr.length() || std::strncmp(current, tok->mStr.c_str(), length))
+        if (!tok || length != tok->mStr.length() || std::strncmp(current, tok->mStr.c_str(), length) != 0)
             return false;
 
         current = next;
         if (*next) {
             next = std::strchr(++current, ' ');
             if (!next)
-                next = current + std::strlen(current);
+                next = end;
         }
         tok = tok->next();
     }
@@ -584,9 +612,9 @@ bool Token::simpleMatch(const Token *tok, const char pattern[])
 bool Token::firstWordEquals(const char *str, const char *word)
 {
     for (;;) {
-        if (*str != *word) {
+        if (*str != *word)
             return (*str == ' ' && *word == 0);
-        } else if (*str == 0)
+        if (*str == 0)
             break;
 
         ++str;
@@ -611,8 +639,11 @@ const char *Token::chrInFirstWord(const char *str, char c)
 
 bool Token::Match(const Token *tok, const char pattern[], nonneg int varid)
 {
+    if (!(*pattern))
+        return true;
+
     const char *p = pattern;
-    while (*p) {
+    while (true) {
         // Skip spaces in pattern..
         while (*p == ' ')
             ++p;
@@ -627,8 +658,9 @@ bool Token::Match(const Token *tok, const char pattern[], nonneg int varid)
                 while (*p && *p != ' ')
                     ++p;
                 continue;
-            } else
-                return false;
+            }
+
+            return false;
         }
 
         // [.. => search for a one-character token..
@@ -659,8 +691,6 @@ bool Token::Match(const Token *tok, const char pattern[], nonneg int varid)
                 return false;
 
             p = temp;
-            while (*p && *p != ' ')
-                ++p;
         }
 
         // Parse "not" options. Token can be anything except the given one
@@ -668,26 +698,26 @@ bool Token::Match(const Token *tok, const char pattern[], nonneg int varid)
             p += 2;
             if (firstWordEquals(p, tok->str().c_str()))
                 return false;
-            while (*p && *p != ' ')
-                ++p;
         }
 
         // Parse multi options, such as void|int|char (accept token which is one of these 3)
         else {
-            const int res = multiCompare(tok, p, varid);
+            const int res = multiCompareImpl(tok, p, varid);
             if (res == 0) {
                 // Empty alternative matches, use the same token on next round
                 while (*p && *p != ' ')
                     ++p;
                 continue;
-            } else if (res == -1) {
+            }
+            if (res == -1) {
                 // No match
                 return false;
             }
         }
 
-        while (*p && *p != ' ')
-            ++p;
+        // using strchr() for the other instances leads to a performance decrease
+        if (!(p = strchr(p, ' ')))
+            break;
 
         tok = tok->next();
     }
@@ -701,34 +731,17 @@ nonneg int Token::getStrLength(const Token *tok)
     assert(tok != nullptr);
     assert(tok->mTokType == eString);
 
-    int len = 0;
-    const std::string str(getStringLiteral(tok->str()));
-    std::string::const_iterator it = str.begin();
-    const std::string::const_iterator end = str.end();
+    const std::string s(replaceEscapeSequences(getStringLiteral(tok->str())));
 
-    while (it != end) {
-        if (*it == '\\') {
-            ++it;
-
-            // string ends at '\0'
-            if (*it == '0')
-                return len;
-        }
-
-        if (*it == '\0')
-            return len;
-
-        ++it;
-        ++len;
-    }
-
-    return len;
+    const auto pos = s.find('\0');
+    return pos < s.size() ? pos : s.size();
 }
 
 nonneg int Token::getStrArraySize(const Token *tok)
 {
     assert(tok != nullptr);
     assert(tok->tokType() == eString);
+    // cppcheck-suppress shadowFunction - TODO: fix this
     const std::string str(getStringLiteral(tok->str()));
     int sizeofstring = 1;
     for (int i = 0; i < (int)str.size(); i++) {
@@ -739,7 +752,7 @@ nonneg int Token::getStrArraySize(const Token *tok)
     return sizeofstring;
 }
 
-nonneg int Token::getStrSize(const Token *tok, const Settings *settings)
+nonneg int Token::getStrSize(const Token *tok, const Settings &settings)
 {
     assert(tok != nullptr && tok->tokType() == eString);
     nonneg int sizeofType = 1;
@@ -749,36 +762,6 @@ nonneg int Token::getStrSize(const Token *tok, const Settings *settings)
         sizeofType = ValueFlow::getSizeOf(vt, settings);
     }
     return getStrArraySize(tok) * sizeofType;
-}
-
-std::string Token::getCharAt(const Token *tok, MathLib::bigint index)
-{
-    assert(tok != nullptr);
-    std::string str(getStringLiteral(tok->str()));
-    std::string::const_iterator it = str.begin();
-    const std::string::const_iterator end = str.end();
-
-    while (it != end) {
-        if (index == 0) {
-            if (*it == '\0')
-                return "\\0";
-
-            std::string ret(1, *it);
-            if (*it == '\\') {
-                ++it;
-                ret += *it;
-            }
-            return ret;
-        }
-
-        if (*it == '\\')
-            ++it;
-        ++it;
-        --index;
-    }
-    assert(index == 0);
-
-    return "\\0";
 }
 
 void Token::move(Token *srcStart, Token *srcEnd, Token *newLocation)
@@ -802,12 +785,13 @@ void Token::move(Token *srcStart, Token *srcEnd, Token *newLocation)
         tok->mImpl->mProgressValue = newLocation->mImpl->mProgressValue;
 }
 
-Token* Token::nextArgument() const
+template<class T, REQUIRES("T must be a Token class", std::is_convertible<T*, const Token*> )>
+static T* nextArgumentImpl(T *thisTok)
 {
-    for (const Token* tok = this; tok; tok = tok->next()) {
+    for (T* tok = thisTok; tok; tok = tok->next()) {
         if (tok->str() == ",")
             return tok->next();
-        else if (tok->link() && Token::Match(tok, "(|{|[|<"))
+        if (tok->link() && Token::Match(tok, "(|{|[|<"))
             tok = tok->link();
         else if (Token::Match(tok, ")|;"))
             return nullptr;
@@ -815,12 +799,22 @@ Token* Token::nextArgument() const
     return nullptr;
 }
 
-Token* Token::nextArgumentBeforeCreateLinks2() const
+const Token* Token::nextArgument() const
+{
+    return nextArgumentImpl(this);
+}
+
+Token *Token::nextArgument()
+{
+    return nextArgumentImpl(this);
+}
+
+const Token* Token::nextArgumentBeforeCreateLinks2() const
 {
     for (const Token* tok = this; tok; tok = tok->next()) {
         if (tok->str() == ",")
             return tok->next();
-        else if (tok->link() && Token::Match(tok, "(|{|["))
+        if (tok->link() && Token::Match(tok, "(|{|["))
             tok = tok->link();
         else if (tok->str() == "<") {
             const Token* temp = tok->findClosingBracket();
@@ -832,12 +826,12 @@ Token* Token::nextArgumentBeforeCreateLinks2() const
     return nullptr;
 }
 
-Token* Token::nextTemplateArgument() const
+const Token* Token::nextTemplateArgument() const
 {
     for (const Token* tok = this; tok; tok = tok->next()) {
         if (tok->str() == ",")
             return tok->next();
-        else if (tok->link() && Token::Match(tok, "(|{|[|<"))
+        if (tok->link() && Token::Match(tok, "(|{|[|<"))
             tok = tok->link();
         else if (Token::Match(tok, ">|;"))
             return nullptr;
@@ -858,9 +852,27 @@ const Token * Token::findClosingBracket() const
     if (mStr != "<")
         return nullptr;
 
+    if (!mPrevious)
+        return nullptr;
+
+    if (!(mPrevious->isName() || Token::simpleMatch(mPrevious, "]") ||
+          Token::Match(mPrevious->previous(), "operator %op% <") ||
+          Token::Match(mPrevious->tokAt(-2), "operator [([] [)]] <")))
+        return nullptr;
+
     const Token *closing = nullptr;
     const bool templateParameter(strAt(-1) == "template");
     std::set<std::string> templateParameters;
+
+    bool isDecl = true;
+    for (const Token *prev = previous(); prev; prev = prev->previous()) {
+        if (prev->str() == "=")
+            isDecl = false;
+        if (Token::simpleMatch(prev, "template <"))
+            isDecl = true;
+        if (Token::Match(prev, "[;{}]"))
+            break;
+    }
 
     unsigned int depth = 0;
     for (closing = this; closing != nullptr; closing = closing->next()) {
@@ -872,20 +884,22 @@ const Token * Token::findClosingBracket() const
             return nullptr;
         // we can make some guesses for template parameters
         else if (closing->str() == "<" && closing->previous() &&
-                 (closing->previous()->isName() || isOperator(closing->previous())) &&
+                 (closing->previous()->isName() || Token::simpleMatch(closing->previous(), "]") || isOperator(closing->previous())) &&
                  (templateParameter ? templateParameters.find(closing->strAt(-1)) == templateParameters.end() : true))
             ++depth;
         else if (closing->str() == ">") {
             if (--depth == 0)
                 return closing;
-        } else if (closing->str() == ">>") {
+        } else if (closing->str() == ">>" || closing->str() == ">>=") {
+            if (!isDecl && depth == 1)
+                continue;
             if (depth <= 2)
                 return closing;
             depth -= 2;
         }
         // save named template parameter
-        else if (templateParameter && depth == 1 && closing->str() == "," &&
-                 closing->previous()->isName() && !Match(closing->previous(), "class|typename|."))
+        else if (templateParameter && depth == 1 && Token::Match(closing, "[,=]") &&
+                 closing->previous()->isName() && !Token::Match(closing->previous(), "class|typename|.") && !Token::Match(closing->tokAt(-2), "=|::"))
             templateParameters.insert(closing->strAt(-1));
     }
 
@@ -895,7 +909,7 @@ const Token * Token::findClosingBracket() const
 Token * Token::findClosingBracket()
 {
     // return value of const function
-    return const_cast<Token*>(const_cast<const Token*>(this)->findClosingBracket());
+    return const_cast<Token*>(static_cast<const Token*>(this)->findClosingBracket());
 }
 
 const Token * Token::findOpeningBracket() const
@@ -927,24 +941,55 @@ const Token * Token::findOpeningBracket() const
 Token * Token::findOpeningBracket()
 {
     // return value of const function
-    return const_cast<Token*>(const_cast<const Token*>(this)->findOpeningBracket());
+    return const_cast<Token*>(static_cast<const Token*>(this)->findOpeningBracket());
 }
 
 //---------------------------------------------------------------------------
 
-const Token *Token::findsimplematch(const Token * const startTok, const char pattern[])
+template<class T, REQUIRES("T must be a Token class", std::is_convertible<T*, const Token*> )>
+static T *findsimplematchImpl(T * const startTok, const char pattern[], size_t pattern_len)
 {
-    for (const Token* tok = startTok; tok; tok = tok->next()) {
-        if (Token::simpleMatch(tok, pattern))
+    for (T* tok = startTok; tok; tok = tok->next()) {
+        if (Token::simpleMatch(tok, pattern, pattern_len))
             return tok;
     }
     return nullptr;
 }
 
-const Token *Token::findsimplematch(const Token * const startTok, const char pattern[], const Token * const end)
+const Token *Token::findsimplematch(const Token * const startTok, const char pattern[], size_t pattern_len)
 {
-    for (const Token* tok = startTok; tok && tok != end; tok = tok->next()) {
-        if (Token::simpleMatch(tok, pattern))
+    return findsimplematchImpl(startTok, pattern, pattern_len);
+}
+
+Token *Token::findsimplematch(Token * const startTok, const char pattern[], size_t pattern_len)
+{
+    return findsimplematchImpl(startTok, pattern, pattern_len);
+}
+
+template<class T, REQUIRES("T must be a Token class", std::is_convertible<T*, const Token*> )>
+static T *findsimplematchImpl(T * const startTok, const char pattern[], size_t pattern_len, const Token * const end)
+{
+    for (T* tok = startTok; tok && tok != end; tok = tok->next()) {
+        if (Token::simpleMatch(tok, pattern, pattern_len))
+            return tok;
+    }
+    return nullptr;
+}
+
+const Token *Token::findsimplematch(const Token * const startTok, const char pattern[], size_t pattern_len, const Token * const end)
+{
+    return findsimplematchImpl(startTok, pattern, pattern_len, end);
+}
+
+Token *Token::findsimplematch(Token * const startTok, const char pattern[], size_t pattern_len, const Token * const end) {
+    return findsimplematchImpl(startTok, pattern, pattern_len, end);
+}
+
+template<class T, REQUIRES("T must be a Token class", std::is_convertible<T*, const Token*> )>
+static T *findmatchImpl(T * const startTok, const char pattern[], const nonneg int varId)
+{
+    for (T* tok = startTok; tok; tok = tok->next()) {
+        if (Token::Match(tok, pattern, varId))
             return tok;
     }
     return nullptr;
@@ -952,7 +997,17 @@ const Token *Token::findsimplematch(const Token * const startTok, const char pat
 
 const Token *Token::findmatch(const Token * const startTok, const char pattern[], const nonneg int varId)
 {
-    for (const Token* tok = startTok; tok; tok = tok->next()) {
+    return findmatchImpl(startTok, pattern, varId);
+}
+
+Token *Token::findmatch(Token * const startTok, const char pattern[], const nonneg int varId) {
+    return findmatchImpl(startTok, pattern, varId);
+}
+
+template<class T, REQUIRES("T must be a Token class", std::is_convertible<T*, const Token*> )>
+static T *findmatchImpl(T * const startTok, const char pattern[], const Token * const end, const nonneg int varId)
+{
+    for (T* tok = startTok; tok && tok != end; tok = tok->next()) {
         if (Token::Match(tok, pattern, varId))
             return tok;
     }
@@ -961,11 +1016,11 @@ const Token *Token::findmatch(const Token * const startTok, const char pattern[]
 
 const Token *Token::findmatch(const Token * const startTok, const char pattern[], const Token * const end, const nonneg int varId)
 {
-    for (const Token* tok = startTok; tok && tok != end; tok = tok->next()) {
-        if (Token::Match(tok, pattern, varId))
-            return tok;
-    }
-    return nullptr;
+    return findmatchImpl(startTok, pattern, end, varId);
+}
+
+Token *Token::findmatch(Token * const startTok, const char pattern[], const Token * const end, const nonneg int varId) {
+    return findmatchImpl(startTok, pattern, end, varId);
 }
 
 void Token::function(const Function *f)
@@ -980,7 +1035,7 @@ void Token::function(const Function *f)
         tokType(eName);
 }
 
-void Token::insertToken(const std::string &tokenStr, const std::string &originalNameStr, bool prepend)
+Token* Token::insertToken(const std::string& tokenStr, const std::string& originalNameStr, const std::string& macroNameStr, bool prepend)
 {
     Token *newToken;
     if (mStr.empty())
@@ -988,8 +1043,8 @@ void Token::insertToken(const std::string &tokenStr, const std::string &original
     else
         newToken = new Token(mTokensFrontBack);
     newToken->str(tokenStr);
-    if (!originalNameStr.empty())
-        newToken->originalName(originalNameStr);
+    newToken->originalName(originalNameStr);
+    newToken->setMacroName(macroNameStr);
 
     if (newToken != this) {
         newToken->mImpl->mLineNumber = mImpl->mLineNumber;
@@ -1000,8 +1055,8 @@ void Token::insertToken(const std::string &tokenStr, const std::string &original
             if (this->previous()) {
                 newToken->previous(this->previous());
                 newToken->previous()->next(newToken);
-            } else if (mTokensFrontBack) {
-                mTokensFrontBack->front = newToken;
+            } else {
+                mTokensFrontBack.front = newToken;
             }
             this->previous(newToken);
             newToken->next(this);
@@ -1009,8 +1064,8 @@ void Token::insertToken(const std::string &tokenStr, const std::string &original
             if (this->next()) {
                 newToken->next(this->next());
                 newToken->next()->previous(newToken);
-            } else if (mTokensFrontBack) {
-                mTokensFrontBack->back = newToken;
+            } else {
+                mTokensFrontBack.back = newToken;
             }
             this->next(newToken);
             newToken->previous(this);
@@ -1018,36 +1073,35 @@ void Token::insertToken(const std::string &tokenStr, const std::string &original
 
         if (mImpl->mScopeInfo) {
             // If the brace is immediately closed there is no point opening a new scope for it
-            if (tokenStr == "{") {
+            if (newToken->str() == "{") {
                 std::string nextScopeNameAddition;
                 // This might be the opening of a member function
                 Token *tok1 = newToken;
                 while (Token::Match(tok1->previous(), "const|volatile|final|override|&|&&|noexcept"))
                     tok1 = tok1->previous();
-                if (tok1 && tok1->previous() && tok1->strAt(-1) == ")") {
+                if (tok1->previous() && tok1->strAt(-1) == ")") {
                     tok1 = tok1->linkAt(-1);
                     if (Token::Match(tok1->previous(), "throw|noexcept")) {
                         tok1 = tok1->previous();
                         while (Token::Match(tok1->previous(), "const|volatile|final|override|&|&&|noexcept"))
                             tok1 = tok1->previous();
                         if (tok1->strAt(-1) != ")")
-                            return;
+                            return newToken;
                     } else if (Token::Match(newToken->tokAt(-2), ":|, %name%")) {
                         tok1 = tok1->tokAt(-2);
                         if (tok1->strAt(-1) != ")")
-                            return;
+                            return newToken;
                     }
                     if (tok1->strAt(-1) == ">")
                         tok1 = tok1->previous()->findOpeningBracket();
                     if (tok1 && Token::Match(tok1->tokAt(-3), "%name% :: %name%")) {
                         tok1 = tok1->tokAt(-2);
+                        // cppcheck-suppress shadowFunction - TODO: fix this
                         std::string scope = tok1->strAt(-1);
                         while (Token::Match(tok1->tokAt(-2), ":: %name%")) {
                             scope = tok1->strAt(-3) + " :: " + scope;
                             tok1 = tok1->tokAt(-2);
                         }
-
-                        if (!nextScopeNameAddition.empty() && !scope.empty()) nextScopeNameAddition += " :: ";
                         nextScopeNameAddition += scope;
                     }
                 }
@@ -1063,7 +1117,8 @@ void Token::insertToken(const std::string &tokenStr, const std::string &original
                             nextScopeNameAddition.append(nameTok->str());
                             nextScopeNameAddition.append(" ");
                         }
-                        if (nextScopeNameAddition.length() > 0) nextScopeNameAddition = nextScopeNameAddition.substr(0, nextScopeNameAddition.length() - 1);
+                        if (!nextScopeNameAddition.empty())
+                            nextScopeNameAddition.pop_back();
                     }
                 }
 
@@ -1074,8 +1129,8 @@ void Token::insertToken(const std::string &tokenStr, const std::string &original
                 newScopeInfo->name.append(nextScopeNameAddition);
                 nextScopeNameAddition = "";
 
-                newToken->scopeInfo(newScopeInfo);
-            } else if (tokenStr == "}") {
+                newToken->scopeInfo(std::move(newScopeInfo));
+            } else if (newToken->str() == "}") {
                 Token* matchingTok = newToken->previous();
                 int depth = 0;
                 while (matchingTok && (depth != 0 || !Token::simpleMatch(matchingTok, "{"))) {
@@ -1092,9 +1147,11 @@ void Token::insertToken(const std::string &tokenStr, const std::string &original
                 } else {
                     newToken->mImpl->mScopeInfo = mImpl->mScopeInfo;
                 }
-                if (tokenStr == ";") {
-                    const Token* statementStart;
-                    for (statementStart = newToken; statementStart->previous() && !Token::Match(statementStart->previous(), ";|{"); statementStart = statementStart->previous());
+                if (newToken->str() == ";") {
+                    const Token* statementStart = newToken;
+                    while (statementStart->previous() && !Token::Match(statementStart->previous(), ";|{")) {
+                        statementStart = statementStart->previous();
+                    }
                     if (Token::Match(statementStart, "using namespace %name% ::|;")) {
                         const Token * tok1 = statementStart->tokAt(2);
                         std::string nameSpace;
@@ -1110,6 +1167,7 @@ void Token::insertToken(const std::string &tokenStr, const std::string &original
             }
         }
     }
+    return newToken;
 }
 
 void Token::eraseTokens(Token *begin, const Token *end)
@@ -1131,66 +1189,106 @@ void Token::createMutualLinks(Token *begin, Token *end)
     end->link(begin);
 }
 
-void Token::printOut(const char *title) const
+void Token::printOut() const
 {
-    if (title && title[0])
-        std::cout << "\n### " << title << " ###\n";
-    std::cout << stringifyList(true, true, true, true, true, nullptr, nullptr) << std::endl;
+    printOut(std::cout, "");
 }
 
-void Token::printOut(const char *title, const std::vector<std::string> &fileNames) const
+void Token::printOut(std::ostream& out, const char *title) const
 {
     if (title && title[0])
-        std::cout << "\n### " << title << " ###\n";
-    std::cout << stringifyList(true, true, true, true, true, &fileNames, nullptr) << std::endl;
+        out << "\n### " << title << " ###\n";
+    out << stringifyList(stringifyOptions::forPrintOut(), nullptr, nullptr) << std::endl;
 }
 
-void Token::stringify(std::ostream& os, bool varid, bool attributes, bool macro) const
+void Token::printOut(std::ostream& out, const char *title, const std::vector<std::string> &fileNames) const
 {
-    if (attributes) {
+    if (title && title[0])
+        out << "\n### " << title << " ###\n";
+    out << stringifyList(stringifyOptions::forPrintOut(), &fileNames, nullptr) << std::endl;
+}
+
+// cppcheck-suppress unusedFunction - used for debugging
+void Token::printLines(std::ostream& out, int lines) const
+{
+    const Token *end = this;
+    while (end && end->linenr() < lines + linenr())
+        end = end->next();
+    out << stringifyList(stringifyOptions::forDebugExprId(), nullptr, end) << std::endl;
+}
+
+std::string Token::stringify(const stringifyOptions& options) const
+{
+    std::string ret;
+    if (options.attributes) {
         if (isUnsigned())
-            os << "unsigned ";
+            ret += "unsigned ";
         else if (isSigned())
-            os << "signed ";
+            ret += "signed ";
         if (isComplex())
-            os << "_Complex ";
+            ret += "_Complex ";
         if (isLong()) {
             if (!(mTokType == eString || mTokType == eChar))
-                os << "long ";
+                ret += "long ";
         }
     }
-    if (macro && isExpandedMacro())
-        os << "$";
+    if (options.macro && isExpandedMacro())
+        ret += '$';
     if (isName() && mStr.find(' ') != std::string::npos) {
-        for (char i : mStr) {
+        for (const char i : mStr) {
             if (i != ' ')
-                os << i;
+                ret += i;
         }
     } else if (mStr[0] != '\"' || mStr.find('\0') == std::string::npos)
-        os << mStr;
+        ret += mStr;
     else {
-        for (char i : mStr) {
+        for (const char i : mStr) {
             if (i == '\0')
-                os << "\\0";
+                ret += "\\0";
             else
-                os << i;
+                ret += i;
         }
     }
-    if (varid && mImpl->mVarId != 0)
-        os << '@' << mImpl->mVarId;
+    if (options.varid && mImpl->mVarId != 0) {
+        ret += '@';
+        ret += (options.idtype ? "var" : "");
+        ret += std::to_string(mImpl->mVarId);
+    } else if (options.exprid && mImpl->mExprId != 0) {
+        ret += '@';
+        ret += (options.idtype ? "expr" : "");
+        if ((mImpl->mExprId & (1U << efIsUnique)) != 0)
+            ret += "UNIQUE";
+        else
+            ret += std::to_string(mImpl->mExprId);
+    }
+
+    return ret;
 }
 
-std::string Token::stringifyList(bool varid, bool attributes, bool linenumbers, bool linebreaks, bool files, const std::vector<std::string>* fileNames, const Token* end) const
+std::string Token::stringify(bool varid, bool attributes, bool macro) const
+{
+    stringifyOptions options;
+    options.varid = varid;
+    options.attributes = attributes;
+    options.macro = macro;
+    return stringify(options);
+}
+
+std::string Token::stringifyList(const stringifyOptions& options, const std::vector<std::string>* fileNames, const Token* end) const
 {
     if (this == end)
         return "";
 
-    std::ostringstream ret;
+    std::string ret;
 
-    unsigned int lineNumber = mImpl->mLineNumber - (linenumbers ? 1U : 0U);
-    unsigned int fileIndex = files ? ~0U : mImpl->mFileIndex;
+    unsigned int lineNumber = mImpl->mLineNumber - (options.linenumbers ? 1U : 0U);
+    // cppcheck-suppress shadowFunction - TODO: fix this
+    unsigned int fileIndex = options.files ? ~0U : mImpl->mFileIndex;
     std::map<int, unsigned int> lineNumbers;
     for (const Token *tok = this; tok != end; tok = tok->next()) {
+        assert(tok && "end precedes token");
+        if (!tok)
+            return ret;
         bool fileChange = false;
         if (tok->mImpl->mFileIndex != fileIndex) {
             if (fileIndex != ~0U) {
@@ -1198,47 +1296,72 @@ std::string Token::stringifyList(bool varid, bool attributes, bool linenumbers, 
             }
 
             fileIndex = tok->mImpl->mFileIndex;
-            if (files) {
-                ret << "\n\n##file ";
+            if (options.files) {
+                ret += "\n\n##file ";
                 if (fileNames && fileNames->size() > tok->mImpl->mFileIndex)
-                    ret << fileNames->at(tok->mImpl->mFileIndex);
+                    ret += fileNames->at(tok->mImpl->mFileIndex);
                 else
-                    ret << fileIndex;
-                ret << '\n';
+                    ret += std::to_string(fileIndex);
+                ret += '\n';
             }
 
             lineNumber = lineNumbers[fileIndex];
             fileChange = true;
         }
 
-        if (linebreaks && (lineNumber != tok->linenr() || fileChange)) {
+        if (options.linebreaks && (lineNumber != tok->linenr() || fileChange)) {
             if (lineNumber+4 < tok->linenr() && fileIndex == tok->mImpl->mFileIndex) {
-                ret << '\n' << lineNumber+1 << ":\n|\n";
-                ret << tok->linenr()-1 << ":\n";
-                ret << tok->linenr() << ": ";
-            } else if (this == tok && linenumbers) {
-                ret << tok->linenr() << ": ";
+                ret += '\n';
+                ret += std::to_string(lineNumber+1);
+                ret += ":\n|\n";
+                ret += std::to_string(tok->linenr()-1);
+                ret += ":\n";
+                ret += std::to_string(tok->linenr());
+                ret += ": ";
+            } else if (this == tok && options.linenumbers) {
+                ret += std::to_string(tok->linenr());
+                ret += ": ";
+            } else if (lineNumber > tok->linenr()) {
+                lineNumber = tok->linenr();
+                ret += '\n';
+                if (options.linenumbers) {
+                    ret += std::to_string(lineNumber);
+                    ret += ':';
+                    ret += ' ';
+                }
             } else {
                 while (lineNumber < tok->linenr()) {
                     ++lineNumber;
-                    ret << '\n';
-                    if (linenumbers) {
-                        ret << lineNumber << ':';
+                    ret += '\n';
+                    if (options.linenumbers) {
+                        ret += std::to_string(lineNumber);
+                        ret += ':';
                         if (lineNumber == tok->linenr())
-                            ret << ' ';
+                            ret += ' ';
                     }
                 }
             }
             lineNumber = tok->linenr();
         }
 
-        tok->stringify(ret, varid, attributes, attributes); // print token
-        if (tok->next() != end && (!linebreaks || (tok->next()->linenr() <= tok->linenr() && tok->next()->fileIndex() == tok->fileIndex())))
-            ret << ' ';
+        ret += tok->stringify(options); // print token
+        if (tok->next() != end && (!options.linebreaks || (tok->next()->linenr() == tok->linenr() && tok->next()->fileIndex() == tok->fileIndex())))
+            ret += ' ';
     }
-    if (linebreaks && (files || linenumbers))
-        ret << '\n';
-    return ret.str();
+    if (options.linebreaks && (options.files || options.linenumbers))
+        ret += '\n';
+    return ret;
+}
+std::string Token::stringifyList(bool varid, bool attributes, bool linenumbers, bool linebreaks, bool files, const std::vector<std::string>* fileNames, const Token* end) const
+{
+    stringifyOptions options;
+    options.varid = varid;
+    options.attributes = attributes;
+    options.macro = attributes;
+    options.linenumbers = linenumbers;
+    options.linebreaks = linebreaks;
+    options.files = files;
+    return stringifyList(options, fileNames, end);
 }
 
 std::string Token::stringifyList(const Token* end, bool attributes) const
@@ -1251,19 +1374,33 @@ std::string Token::stringifyList(bool varid) const
     return stringifyList(varid, false, true, true, true, nullptr, nullptr);
 }
 
+void Token::astParent(Token* tok)
+{
+    const Token* tok2 = tok;
+    while (tok2) {
+        if (this == tok2)
+            throw InternalError(this, "Internal error. AST cyclic dependency.");
+        tok2 = tok2->astParent();
+    }
+    // Clear children to avoid nodes referenced twice
+    if (this->astParent()) {
+        Token* parent = this->astParent();
+        if (parent->astOperand1() == this)
+            parent->mImpl->mAstOperand1 = nullptr;
+        if (parent->astOperand2() == this)
+            parent->mImpl->mAstOperand2 = nullptr;
+    }
+    mImpl->mAstParent = tok;
+}
+
 void Token::astOperand1(Token *tok)
 {
     if (mImpl->mAstOperand1)
-        mImpl->mAstOperand1->mImpl->mAstParent = nullptr;
+        mImpl->mAstOperand1->astParent(nullptr);
     // goto parent operator
     if (tok) {
-        std::set<Token*> visitedParents;
-        while (tok->mImpl->mAstParent) {
-            if (!visitedParents.insert(tok->mImpl->mAstParent).second) // #6838/#6726/#8352 avoid hang on garbage code
-                throw InternalError(this, "Internal error. Token::astOperand1() cyclic dependency.");
-            tok = tok->mImpl->mAstParent;
-        }
-        tok->mImpl->mAstParent = this;
+        tok = tok->astTop();
+        tok->astParent(this);
     }
     mImpl->mAstOperand1 = tok;
 }
@@ -1271,17 +1408,11 @@ void Token::astOperand1(Token *tok)
 void Token::astOperand2(Token *tok)
 {
     if (mImpl->mAstOperand2)
-        mImpl->mAstOperand2->mImpl->mAstParent = nullptr;
+        mImpl->mAstOperand2->astParent(nullptr);
     // goto parent operator
     if (tok) {
-        std::set<Token*> visitedParents;
-        while (tok->mImpl->mAstParent) {
-            //std::cout << tok << " -> " << tok->mAstParent ;
-            if (!visitedParents.insert(tok->mImpl->mAstParent).second) // #6838/#6726 avoid hang on garbage code
-                throw InternalError(this, "Internal error. Token::astOperand2() cyclic dependency.");
-            tok = tok->mImpl->mAstParent;
-        }
-        tok->mImpl->mAstParent = this;
+        tok = tok->astTop();
+        tok->astParent(this);
     }
     mImpl->mAstOperand2 = tok;
 }
@@ -1326,8 +1457,7 @@ std::pair<const Token *, const Token *> Token::findExpressionStartEndTokens() co
 
     // find start node in AST tree
     const Token *start = top;
-    while (start->astOperand1() &&
-           (start->astOperand2() || !start->isUnaryPreOp() || Token::simpleMatch(start, "( )") || start->str() == "{"))
+    while (start->astOperand1() && precedes(start->astOperand1(), start))
         start = start->astOperand1();
 
     // find end node in AST tree
@@ -1342,7 +1472,7 @@ std::pair<const Token *, const Token *> Token::findExpressionStartEndTokens() co
             }
         }
         if (Token::Match(end,"(|[|{") &&
-            !(Token::Match(end, "( %type%") && !end->astOperand2())) {
+            !(Token::Match(end, "( ::| %type%") && !end->astOperand2())) {
             end = end->link();
             break;
         }
@@ -1354,6 +1484,12 @@ std::pair<const Token *, const Token *> Token::findExpressionStartEndTokens() co
     end = goToRightParenthesis(start, end);
     if (Token::simpleMatch(end, "{"))
         end = end->link();
+
+    if (precedes(top, start))
+        throw InternalError(start, "Cannot find start of expression");
+    if (succeeds(top, end))
+        throw InternalError(end, "Cannot find end of expression");
+
     return std::pair<const Token *, const Token *>(start,end);
 }
 
@@ -1397,7 +1533,7 @@ bool Token::isUnaryPreOp() const
 {
     if (!astOperand1() || astOperand2())
         return false;
-    if (!Token::Match(this, "++|--"))
+    if (this->tokType() != Token::eIncDecOp)
         return true;
     const Token *tokbefore = mPrevious;
     const Token *tokafter = mNext;
@@ -1414,22 +1550,38 @@ bool Token::isUnaryPreOp() const
 
 static std::string stringFromTokenRange(const Token* start, const Token* end)
 {
-    std::ostringstream ret;
+    std::string ret;
     if (end)
         end = end->next();
     for (const Token *tok = start; tok && tok != end; tok = tok->next()) {
         if (tok->isUnsigned())
-            ret << "unsigned ";
+            ret += "unsigned ";
         if (tok->isLong() && !tok->isLiteral())
-            ret << "long ";
-        if (tok->originalName().empty() || tok->isUnsigned() || tok->isLong()) {
-            ret << tok->str();
+            ret += "long ";
+        if (tok->tokType() == Token::eString) {
+            for (const unsigned char c: tok->str()) {
+                if (c == '\n')
+                    ret += "\\n";
+                else if (c == '\r')
+                    ret += "\\r";
+                else if (c == '\t')
+                    ret += "\\t";
+                else if (c >= ' ' && c <= 126)
+                    ret += c;
+                else {
+                    char str[10];
+                    sprintf(str, "\\x%02x", c);
+                    ret += str;
+                }
+            }
+        } else if (tok->originalName().empty() || tok->isUnsigned() || tok->isLong()) {
+            ret += tok->str();
         } else
-            ret << tok->originalName();
+            ret += tok->originalName();
         if (Token::Match(tok, "%name%|%num% %name%|%num%"))
-            ret << ' ';
+            ret += ' ';
     }
-    return ret.str();
+    return ret;
 }
 
 std::string Token::expressionString() const
@@ -1443,8 +1595,8 @@ static void astStringXml(const Token *tok, nonneg int indent, std::ostream &out)
     const std::string strindent(indent, ' ');
 
     out << strindent << "<token str=\"" << tok->str() << '\"';
-    if (tok->varId() > 0U)
-        out << " varId=\"" << MathLib::toString(tok->varId()) << '\"';
+    if (tok->varId())
+        out << " varId=\"" << tok->varId() << '\"';
     if (tok->variable())
         out << " variable=\"" << tok->variable() << '\"';
     if (tok->function())
@@ -1466,14 +1618,15 @@ static void astStringXml(const Token *tok, nonneg int indent, std::ostream &out)
     }
 }
 
-void Token::printAst(bool verbose, bool xml, std::ostream &out) const
+void Token::printAst(bool verbose, bool xml, const std::vector<std::string> &fileNames, std::ostream &out) const
 {
+    if (!xml)
+        out << "\n\n##AST" << std::endl;
+
     std::set<const Token *> printed;
     for (const Token *tok = this; tok; tok = tok->next()) {
         if (!tok->mImpl->mAstParent && tok->mImpl->mAstOperand1) {
-            if (printed.empty() && !xml)
-                out << "\n\n##AST" << std::endl;
-            else if (printed.find(tok) != printed.end())
+            if (printed.find(tok) != printed.end())
                 continue;
             printed.insert(tok);
 
@@ -1483,7 +1636,7 @@ void Token::printAst(bool verbose, bool xml, std::ostream &out) const
                 astStringXml(tok, 2U, out);
                 out << "</ast>" << std::endl;
             } else if (verbose)
-                out << tok->astStringVerbose() << std::endl;
+                out << "[" << fileNames[tok->fileIndex()] << ":" << tok->linenr() << "]" << std::endl << tok->astStringVerbose() << std::endl;
             else
                 out << tok->astString(" ") << std::endl;
             if (tok->str() == "(")
@@ -1509,7 +1662,7 @@ void Token::astStringVerboseRecursive(std::string& ret, const nonneg int indent1
         ret += " \'" + mImpl->mValueType->str() + '\'';
     if (function()) {
         std::ostringstream ostr;
-        ostr << "0x" << std::hex << function();
+        ostr << std::hex << function();
         ret += " f:" + ostr.str();
     }
     ret += '\n';
@@ -1539,189 +1692,235 @@ std::string Token::astStringVerbose() const
     return ret;
 }
 
+// cppcheck-suppress unusedFunction // used in test
+std::string Token::astStringZ3() const
+{
+    if (!astOperand1())
+        return str();
+    if (!astOperand2())
+        return "(" + str() + " " + astOperand1()->astStringZ3() + ")";
+    return "(" + str() + " " + astOperand1()->astStringZ3() + " " + astOperand2()->astStringZ3() + ")";
+}
 
 void Token::printValueFlow(bool xml, std::ostream &out) const
 {
+    std::string outs;
+
+    // cppcheck-suppress shadowFunction
+    int fileIndex = -1;
     int line = 0;
     if (xml)
-        out << "  <valueflow>" << std::endl;
+        outs += "  <valueflow>\n";
     else
-        out << "\n\n##Value flow" << std::endl;
+        outs += "\n\n##Value flow\n";
     for (const Token *tok = this; tok; tok = tok->next()) {
-        if (!tok->mImpl->mValues)
+        // cppcheck-suppress shadowFunction - TODO: fix this
+        const auto* const values = tok->mImpl->mValues;
+        if (!values)
             continue;
-        if (tok->mImpl->mValues->empty()) // Values might be removed by removeContradictions
+        if (values->empty()) // Values might be removed by removeContradictions
             continue;
-        if (xml)
-            out << "    <values id=\"" << tok->mImpl->mValues << "\">" << std::endl;
-        else if (line != tok->linenr())
-            out << "Line " << tok->linenr() << std::endl;
+        if (xml) {
+            outs += "    <values id=\"";
+            outs += id_string(values);
+            outs +=  "\">";
+            outs += '\n';
+        }
+        else {
+            if (fileIndex != tok->fileIndex()) {
+                outs += "File ";
+                outs += tok->mTokensFrontBack.list.getFiles()[tok->fileIndex()];
+                outs += '\n';
+                line = 0;
+            }
+            if (line != tok->linenr()) {
+                outs += "Line ";
+                outs += std::to_string(tok->linenr());
+                outs += '\n';
+            }
+        }
+        fileIndex = tok->fileIndex();
         line = tok->linenr();
         if (!xml) {
-            out << "  " << tok->str() << (tok->mImpl->mValues->front().isKnown() ? " always " : " possible ");
-            if (tok->mImpl->mValues->size() > 1U)
-                out << '{';
-        }
-        for (const ValueFlow::Value &value : *tok->mImpl->mValues) {
-            if (xml) {
-                out << "      <value ";
-                switch (value.valueType) {
-                case ValueFlow::Value::INT:
-                    if (tok->valueType() && tok->valueType()->sign == ValueType::UNSIGNED)
-                        out << "intvalue=\"" << (MathLib::biguint)value.intvalue << '\"';
-                    else
-                        out << "intvalue=\"" << value.intvalue << '\"';
+            ValueFlow::Value::ValueKind valueKind = values->front().valueKind;
+            const bool same = std::all_of(values->begin(), values->end(), [&](const ValueFlow::Value& value) {
+                return value.valueKind == valueKind;
+            });
+            outs += "  ";
+            outs += tok->str();
+            outs += " ";
+            if (same) {
+                switch (valueKind) {
+                case ValueFlow::Value::ValueKind::Impossible:
+                case ValueFlow::Value::ValueKind::Known:
+                    outs += "always ";
                     break;
-                case ValueFlow::Value::TOK:
-                    out << "tokvalue=\"" << value.tokvalue << '\"';
+                case ValueFlow::Value::ValueKind::Inconclusive:
+                    outs += "inconclusive ";
                     break;
-                case ValueFlow::Value::FLOAT:
-                    out << "floatvalue=\"" << value.floatValue << '\"';
-                    break;
-                case ValueFlow::Value::MOVED:
-                    out << "movedvalue=\"" << ValueFlow::Value::toString(value.moveKind) << '\"';
-                    break;
-                case ValueFlow::Value::UNINIT:
-                    out << "uninit=\"1\"";
-                    break;
-                case ValueFlow::Value::BUFFER_SIZE:
-                    out << "buffer-size=\"" << value.intvalue << "\"";
-                    break;
-                case ValueFlow::Value::CONTAINER_SIZE:
-                    out << "container-size=\"" << value.intvalue << '\"';
-                    break;
-                case ValueFlow::Value::LIFETIME:
-                    out << "lifetime=\"" << value.tokvalue << '\"';
+                case ValueFlow::Value::ValueKind::Possible:
+                    outs += "possible ";
                     break;
                 }
-                if (value.condition)
-                    out << " condition-line=\"" << value.condition->linenr() << '\"';
+            }
+            if (values->size() > 1U)
+                outs += '{';
+        }
+        for (const ValueFlow::Value& value : *values) {
+            if (xml) {
+                outs += "      <value ";
+                switch (value.valueType) {
+                case ValueFlow::Value::ValueType::INT:
+                    if (tok->valueType() && tok->valueType()->sign == ValueType::UNSIGNED) {
+                        outs += "intvalue=\"";
+                        outs += MathLib::toString(static_cast<MathLib::biguint>(value.intvalue));
+                        outs += '\"';
+                    }
+                    else {
+                        outs += "intvalue=\"";
+                        outs += MathLib::toString(value.intvalue);
+                        outs += '\"';
+                    }
+                    break;
+                case ValueFlow::Value::ValueType::TOK:
+                    outs +=  "tokvalue=\"";
+                    outs += id_string(value.tokvalue);
+                    outs += '\"';
+                    break;
+                case ValueFlow::Value::ValueType::FLOAT:
+                    outs += "floatvalue=\"";
+                    outs += std::to_string(value.floatValue); // TODO: should this be MathLib::toString()?
+                    outs += '\"';
+                    break;
+                case ValueFlow::Value::ValueType::MOVED:
+                    outs += "movedvalue=\"";
+                    outs += ValueFlow::Value::toString(value.moveKind);
+                    outs += '\"';
+                    break;
+                case ValueFlow::Value::ValueType::UNINIT:
+                    outs +=  "uninit=\"1\"";
+                    break;
+                case ValueFlow::Value::ValueType::BUFFER_SIZE:
+                    outs += "buffer-size=\"";
+                    outs += MathLib::toString(value.intvalue);
+                    outs += "\"";
+                    break;
+                case ValueFlow::Value::ValueType::CONTAINER_SIZE:
+                    outs += "container-size=\"";
+                    outs += MathLib::toString(value.intvalue);
+                    outs += '\"';
+                    break;
+                case ValueFlow::Value::ValueType::ITERATOR_START:
+                    outs +=  "iterator-start=\"";
+                    outs += MathLib::toString(value.intvalue);
+                    outs += '\"';
+                    break;
+                case ValueFlow::Value::ValueType::ITERATOR_END:
+                    outs +=  "iterator-end=\"";
+                    outs += MathLib::toString(value.intvalue);
+                    outs += '\"';
+                    break;
+                case ValueFlow::Value::ValueType::LIFETIME:
+                    outs += "lifetime=\"";
+                    outs += id_string(value.tokvalue);
+                    outs += '\"';
+                    outs += " lifetime-scope=\"";
+                    outs += ValueFlow::Value::toString(value.lifetimeScope);
+                    outs += "\"";
+                    outs += " lifetime-kind=\"";
+                    outs += ValueFlow::Value::toString(value.lifetimeKind);
+                    outs += "\"";
+                    break;
+                case ValueFlow::Value::ValueType::SYMBOLIC:
+                    outs += "symbolic=\"";
+                    outs += id_string(value.tokvalue);
+                    outs += '\"';
+                    outs += " symbolic-delta=\"";
+                    outs += MathLib::toString(value.intvalue);
+                    outs += '\"';
+                    break;
+                }
+                outs += " bound=\"";
+                outs += ValueFlow::Value::toString(value.bound);
+                outs += "\"";
+                if (value.condition) {
+                    outs += " condition-line=\"";
+                    outs += std::to_string(value.condition->linenr());
+                    outs += '\"';
+                }
                 if (value.isKnown())
-                    out << " known=\"true\"";
+                    outs += " known=\"true\"";
                 else if (value.isPossible())
-                    out << " possible=\"true\"";
+                    outs += " possible=\"true\"";
                 else if (value.isImpossible())
-                    out << " impossible=\"true\"";
+                    outs += " impossible=\"true\"";
                 else if (value.isInconclusive())
-                    out << " inconclusive=\"true\"";
-                out << "/>" << std::endl;
+                    outs += " inconclusive=\"true\"";
+
+                outs += " path=\"";
+                outs += MathLib::toString(value.path);
+                outs += "\"";
+
+                outs += "/>\n";
             }
 
             else {
-                if (&value != &tok->mImpl->mValues->front())
-                    out << ",";
-                if (value.isImpossible())
-                    out << "!";
-                if (value.bound == ValueFlow::Value::Bound::Lower)
-                    out << ">";
-                if (value.bound == ValueFlow::Value::Bound::Upper)
-                    out << "<";
-                switch (value.valueType) {
-                case ValueFlow::Value::INT:
-                    if (tok->valueType() && tok->valueType()->sign == ValueType::UNSIGNED)
-                        out << (MathLib::biguint)value.intvalue;
-                    else
-                        out << value.intvalue;
-                    break;
-                case ValueFlow::Value::TOK:
-                    out << value.tokvalue->str();
-                    break;
-                case ValueFlow::Value::FLOAT:
-                    out << value.floatValue;
-                    break;
-                case ValueFlow::Value::MOVED:
-                    out << ValueFlow::Value::toString(value.moveKind);
-                    break;
-                case ValueFlow::Value::UNINIT:
-                    out << "Uninit";
-                    break;
-                case ValueFlow::Value::BUFFER_SIZE:
-                case ValueFlow::Value::CONTAINER_SIZE:
-                    out << "size=" << value.intvalue;
-                    break;
-                case ValueFlow::Value::LIFETIME:
-                    out << "lifetime=" << value.tokvalue->str();
-                    break;
-                }
-                if (value.indirect > 0)
-                    for (int i=0; i<value.indirect; i++)
-                        out << "*";
-                if (value.path > 0)
-                    out << "@" << value.path;
+                if (&value != &values->front())
+                    outs += ",";
+                outs += value.toString();
             }
         }
         if (xml)
-            out << "    </values>" << std::endl;
-        else if (tok->mImpl->mValues->size() > 1U)
-            out << '}' << std::endl;
+            outs += "    </values>\n";
+        else if (values->size() > 1U)
+            outs += "}\n";
         else
-            out << std::endl;
+            outs += '\n';
     }
     if (xml)
-        out << "  </valueflow>" << std::endl;
+        outs += "  </valueflow>\n";
+
+    out << outs;
 }
 
-const ValueFlow::Value * Token::getValueLE(const MathLib::bigint val, const Settings *settings) const
+const ValueFlow::Value * Token::getValueLE(const MathLib::bigint val, const Settings &settings) const
+{
+    if (!mImpl->mValues)
+        return nullptr;
+    return ValueFlow::findValue(*mImpl->mValues, settings, [&](const ValueFlow::Value& v) {
+        return !v.isImpossible() && v.isIntValue() && v.intvalue <= val;
+    });
+}
+
+const ValueFlow::Value * Token::getValueGE(const MathLib::bigint val, const Settings &settings) const
+{
+    if (!mImpl->mValues)
+        return nullptr;
+    return ValueFlow::findValue(*mImpl->mValues, settings, [&](const ValueFlow::Value& v) {
+        return !v.isImpossible() && v.isIntValue() && v.intvalue >= val;
+    });
+}
+
+const ValueFlow::Value * Token::getValueNE(MathLib::bigint val) const
+{
+    if (!mImpl->mValues)
+        return nullptr;
+    const auto it = std::find_if(mImpl->mValues->cbegin(), mImpl->mValues->cend(), [=](const ValueFlow::Value& value) {
+        return value.isIntValue() && !value.isImpossible() && value.intvalue != val;
+    });
+    return it == mImpl->mValues->end() ? nullptr : &*it;
+}
+
+const ValueFlow::Value * Token::getInvalidValue(const Token *ftok, nonneg int argnr, const Settings &settings) const
 {
     if (!mImpl->mValues)
         return nullptr;
     const ValueFlow::Value *ret = nullptr;
-    std::list<ValueFlow::Value>::const_iterator it;
-    for (it = mImpl->mValues->begin(); it != mImpl->mValues->end(); ++it) {
+    for (auto it = mImpl->mValues->begin(); it != mImpl->mValues->end(); ++it) {
         if (it->isImpossible())
             continue;
-        if (it->isIntValue() && it->intvalue <= val) {
-            if (!ret || ret->isInconclusive() || (ret->condition && !it->isInconclusive()))
-                ret = &(*it);
-            if (!ret->isInconclusive() && !ret->condition)
-                break;
-        }
-    }
-    if (settings && ret) {
-        if (ret->isInconclusive() && !settings->inconclusive)
-            return nullptr;
-        if (ret->condition && !settings->isEnabled(Settings::WARNING))
-            return nullptr;
-    }
-    return ret;
-}
-
-const ValueFlow::Value * Token::getValueGE(const MathLib::bigint val, const Settings *settings) const
-{
-    if (!mImpl->mValues)
-        return nullptr;
-    const ValueFlow::Value *ret = nullptr;
-    std::list<ValueFlow::Value>::const_iterator it;
-    for (it = mImpl->mValues->begin(); it != mImpl->mValues->end(); ++it) {
-        if (it->isImpossible())
-            continue;
-        if (it->isIntValue() && it->intvalue >= val) {
-            if (!ret || ret->isInconclusive() || (ret->condition && !it->isInconclusive()))
-                ret = &(*it);
-            if (!ret->isInconclusive() && !ret->condition)
-                break;
-        }
-    }
-    if (settings && ret) {
-        if (ret->isInconclusive() && !settings->inconclusive)
-            return nullptr;
-        if (ret->condition && !settings->isEnabled(Settings::WARNING))
-            return nullptr;
-    }
-    return ret;
-}
-
-const ValueFlow::Value * Token::getInvalidValue(const Token *ftok, nonneg int argnr, const Settings *settings) const
-{
-    if (!mImpl->mValues || !settings)
-        return nullptr;
-    const ValueFlow::Value *ret = nullptr;
-    std::list<ValueFlow::Value>::const_iterator it;
-    for (it = mImpl->mValues->begin(); it != mImpl->mValues->end(); ++it) {
-        if (it->isImpossible())
-            continue;
-        if ((it->isIntValue() && !settings->library.isIntArgValid(ftok, argnr, it->intvalue)) ||
-            (it->isFloatValue() && !settings->library.isFloatArgValid(ftok, argnr, it->floatValue))) {
+        if ((it->isIntValue() && !settings.library.isIntArgValid(ftok, argnr, it->intvalue)) ||
+            (it->isFloatValue() && !settings.library.isFloatArgValid(ftok, argnr, it->floatValue))) {
             if (!ret || ret->isInconclusive() || (ret->condition && !it->isInconclusive()))
                 ret = &(*it);
             if (!ret->isInconclusive() && !ret->condition)
@@ -1729,27 +1928,28 @@ const ValueFlow::Value * Token::getInvalidValue(const Token *ftok, nonneg int ar
         }
     }
     if (ret) {
-        if (ret->isInconclusive() && !settings->inconclusive)
+        if (ret->isInconclusive() && !settings.certainty.isEnabled(Certainty::inconclusive))
             return nullptr;
-        if (ret->condition && !settings->isEnabled(Settings::WARNING))
+        if (ret->condition && !settings.severity.isEnabled(Severity::warning))
             return nullptr;
     }
     return ret;
 }
 
-const Token *Token::getValueTokenMinStrSize(const Settings *settings) const
+const Token *Token::getValueTokenMinStrSize(const Settings &settings, MathLib::bigint* path) const
 {
     if (!mImpl->mValues)
         return nullptr;
     const Token *ret = nullptr;
     int minsize = INT_MAX;
-    std::list<ValueFlow::Value>::const_iterator it;
-    for (it = mImpl->mValues->begin(); it != mImpl->mValues->end(); ++it) {
+    for (auto it = mImpl->mValues->begin(); it != mImpl->mValues->end(); ++it) {
         if (it->isTokValue() && it->tokvalue && it->tokvalue->tokType() == Token::eString) {
             const int size = getStrSize(it->tokvalue, settings);
             if (!ret || size < minsize) {
                 minsize = size;
                 ret = it->tokvalue;
+                if (path)
+                    *path = it->path;
             }
         }
     }
@@ -1762,8 +1962,7 @@ const Token *Token::getValueTokenMaxStrLength() const
         return nullptr;
     const Token *ret = nullptr;
     int maxlength = 0;
-    std::list<ValueFlow::Value>::const_iterator it;
-    for (it = mImpl->mValues->begin(); it != mImpl->mValues->end(); ++it) {
+    for (auto it = mImpl->mValues->cbegin(); it != mImpl->mValues->end(); ++it) {
         if (it->isTokValue() && it->tokvalue && it->tokvalue->tokType() == Token::eString) {
             const int length = getStrLength(it->tokvalue);
             if (!ret || length > maxlength) {
@@ -1775,87 +1974,167 @@ const Token *Token::getValueTokenMaxStrLength() const
     return ret;
 }
 
-static const Scope *getfunctionscope(const Scope *s)
+static bool isAdjacent(const ValueFlow::Value& x, const ValueFlow::Value& y)
 {
-    while (s && s->type != Scope::eFunction)
-        s = s->nestedIn;
-    return s;
+    if (x.bound != ValueFlow::Value::Bound::Point && x.bound == y.bound)
+        return true;
+    if (x.valueType == ValueFlow::Value::ValueType::FLOAT)
+        return false;
+    return std::abs(x.intvalue - y.intvalue) == 1;
 }
 
-const Token *Token::getValueTokenDeadPointer() const
+static bool removePointValue(std::list<ValueFlow::Value>& values, std::list<ValueFlow::Value>::iterator& x)
 {
-    const Scope * const functionscope = getfunctionscope(this->scope());
-
-    std::list<ValueFlow::Value>::const_iterator it;
-    for (it = values().begin(); it != values().end(); ++it) {
-        // Is this a pointer alias?
-        if (!it->isTokValue() || (it->tokvalue && it->tokvalue->str() != "&"))
-            continue;
-        // Get variable
-        const Token *vartok = it->tokvalue->astOperand1();
-        if (!vartok || !vartok->isName() || !vartok->variable())
-            continue;
-        const Variable * const var = vartok->variable();
-        if (var->isStatic() || var->isReference())
-            continue;
-        if (!var->scope())
-            return nullptr; // #6804
-        if (var->scope()->type == Scope::eUnion && var->scope()->nestedIn == this->scope())
-            continue;
-        // variable must be in same function (not in subfunction)
-        if (functionscope != getfunctionscope(var->scope()))
-            continue;
-        // Is variable defined in this scope or upper scope?
-        const Scope *s = this->scope();
-        while ((s != nullptr) && (s != var->scope()))
-            s = s->nestedIn;
-        if (!s)
-            return it->tokvalue;
-    }
-    return nullptr;
+    const bool isPoint = x->bound == ValueFlow::Value::Bound::Point;
+    if (!isPoint)
+        x->decreaseRange();
+    else
+        x = values.erase(x);
+    return isPoint;
 }
 
 static bool removeContradiction(std::list<ValueFlow::Value>& values)
 {
     bool result = false;
-    for (ValueFlow::Value& x : values) {
-        if (x.isNonValue())
+    for (auto itx = values.begin(); itx != values.end(); ++itx) {
+        if (itx->isNonValue())
             continue;
-        for (ValueFlow::Value& y : values) {
-            if (y.isNonValue())
+
+        auto ity = itx;
+        ++ity;
+        for (; ity != values.end(); ++ity) {
+            if (ity->isNonValue())
                 continue;
-            if (x == y)
+            if (*itx == *ity)
                 continue;
-            if (x.valueType != y.valueType)
+            if (itx->valueType != ity->valueType)
                 continue;
-            if (x.isImpossible() == y.isImpossible())
+            if (itx->isImpossible() == ity->isImpossible())
                 continue;
-            if (!x.equalValue(y))
+            if (itx->isSymbolicValue() && !ValueFlow::Value::sameToken(itx->tokvalue, ity->tokvalue))
                 continue;
-            if (x.bound == y.bound ||
-                (x.bound != ValueFlow::Value::Bound::Point && y.bound != ValueFlow::Value::Bound::Point)) {
-                const bool removex = !x.isImpossible() || y.isKnown();
-                const bool removey = !y.isImpossible() || x.isKnown();
-                if (removex)
-                    values.remove(x);
-                if (removey)
-                    values.remove(y);
-                return true;
-            } else if (x.bound == ValueFlow::Value::Bound::Point) {
-                y.decreaseRange();
-                result = true;
+            if (!itx->equalValue(*ity)) {
+                auto compare = [](const std::list<ValueFlow::Value>::const_iterator& x, const std::list<ValueFlow::Value>::const_iterator& y) {
+                    return x->compareValue(*y, less{});
+                };
+                auto itMax = std::max(itx, ity, compare);
+                auto itMin = std::min(itx, ity, compare);
+                // TODO: Adjust non-points instead of removing them
+                if (itMax->isImpossible() && itMax->bound == ValueFlow::Value::Bound::Upper) {
+                    values.erase(itMin);
+                    return true;
+                }
+                if (itMin->isImpossible() && itMin->bound == ValueFlow::Value::Bound::Lower) {
+                    values.erase(itMax);
+                    return true;
+                }
+                continue;
             }
+            const bool removex = !itx->isImpossible() || ity->isKnown();
+            const bool removey = !ity->isImpossible() || itx->isKnown();
+            if (itx->bound == ity->bound) {
+                if (removex)
+                    values.erase(itx);
+                if (removey)
+                    values.erase(ity);
+                // itx and ity are invalidated
+                return true;
+            }
+            result = removex || removey;
+            bool bail = false;
+            if (removex && removePointValue(values, itx))
+                bail = true;
+            if (removey && removePointValue(values, ity))
+                bail = true;
+            if (bail)
+                return true;
         }
     }
     return result;
 }
 
+using ValueIterator = std::list<ValueFlow::Value>::iterator;
+
+template<class Iterator>
+// NOLINTNEXTLINE(performance-unnecessary-value-param) - false positive
+static ValueIterator removeAdjacentValues(std::list<ValueFlow::Value>& values, ValueIterator x, Iterator start, Iterator last)
+{
+    if (!isAdjacent(*x, **start))
+        return std::next(x);
+    auto it = std::adjacent_find(start, last, [](ValueIterator x, ValueIterator y) {
+        return !isAdjacent(*x, *y);
+    });
+    if (it == last)
+        it--;
+    (*it)->bound = x->bound;
+    std::for_each(std::move(start), std::move(it), [&](ValueIterator y) {
+        values.erase(y);
+    });
+    return values.erase(x);
+}
+
+static void mergeAdjacent(std::list<ValueFlow::Value>& values)
+{
+    for (auto x = values.begin(); x != values.end();) {
+        if (x->isNonValue()) {
+            x++;
+            continue;
+        }
+        if (x->bound == ValueFlow::Value::Bound::Point) {
+            x++;
+            continue;
+        }
+        std::vector<ValueIterator> adjValues;
+        for (auto y = values.begin(); y != values.end(); y++) {
+            if (x == y)
+                continue;
+            if (y->isNonValue())
+                continue;
+            if (x->valueType != y->valueType)
+                continue;
+            if (x->valueKind != y->valueKind)
+                continue;
+            if (x->isSymbolicValue() && !ValueFlow::Value::sameToken(x->tokvalue, y->tokvalue))
+                continue;
+            if (x->bound != y->bound) {
+                if (y->bound != ValueFlow::Value::Bound::Point && isAdjacent(*x, *y)) {
+                    adjValues.clear();
+                    break;
+                }
+                // No adjacent points for floating points
+                if (x->valueType == ValueFlow::Value::ValueType::FLOAT)
+                    continue;
+                if (y->bound != ValueFlow::Value::Bound::Point)
+                    continue;
+            }
+            if (x->bound == ValueFlow::Value::Bound::Lower && !y->compareValue(*x, less{}))
+                continue;
+            if (x->bound == ValueFlow::Value::Bound::Upper && !x->compareValue(*y, less{}))
+                continue;
+            adjValues.push_back(y);
+        }
+        if (adjValues.empty()) {
+            x++;
+            continue;
+        }
+        std::sort(adjValues.begin(), adjValues.end(), [&values](ValueIterator xx, ValueIterator yy) {
+            (void)values;
+            assert(xx != values.end() && yy != values.end());
+            return xx->compareValue(*yy, less{});
+        });
+        if (x->bound == ValueFlow::Value::Bound::Lower)
+            x = removeAdjacentValues(values, x, adjValues.rbegin(), adjValues.rend());
+        else if (x->bound == ValueFlow::Value::Bound::Upper)
+            x = removeAdjacentValues(values, x, adjValues.begin(), adjValues.end());
+    }
+}
+
 static void removeOverlaps(std::list<ValueFlow::Value>& values)
 {
-    for (ValueFlow::Value& x : values) {
+    for (const ValueFlow::Value& x : values) {
         if (x.isNonValue())
             continue;
-        values.remove_if([&](ValueFlow::Value& y) {
+        values.remove_if([&](const ValueFlow::Value& y) {
             if (y.isNonValue())
                 return false;
             if (&x == &y)
@@ -1864,7 +2143,7 @@ static void removeOverlaps(std::list<ValueFlow::Value>& values)
                 return false;
             if (x.valueKind != y.valueKind)
                 return false;
-            // TODO: Remove points coverd in a lower or upper bound
+            // TODO: Remove points covered in a lower or upper bound
             // TODO: Remove lower or upper bound already covered by a lower and upper bound
             if (!x.equalValue(y))
                 return false;
@@ -1873,12 +2152,14 @@ static void removeOverlaps(std::list<ValueFlow::Value>& values)
             return true;
         });
     }
+    mergeAdjacent(values);
 }
 
 // Removing contradictions is an NP-hard problem. Instead we run multiple
 // passes to try to catch most contradictions
 static void removeContradictions(std::list<ValueFlow::Value>& values)
 {
+    removeOverlaps(values);
     for (int i = 0; i < 4; i++) {
         if (!removeContradiction(values))
             return;
@@ -1886,14 +2167,36 @@ static void removeContradictions(std::list<ValueFlow::Value>& values)
     }
 }
 
+static bool sameValueType(const ValueFlow::Value& x, const ValueFlow::Value& y)
+{
+    if (x.valueType != y.valueType)
+        return false;
+    // Symbolic are the same type if they share the same tokvalue
+    if (x.isSymbolicValue())
+        return x.tokvalue->exprId() == 0 || x.tokvalue->exprId() == y.tokvalue->exprId();
+    return true;
+}
+
 bool Token::addValue(const ValueFlow::Value &value)
 {
     if (value.isKnown() && mImpl->mValues) {
         // Clear all other values of the same type since value is known
-        mImpl->mValues->remove_if([&](const ValueFlow::Value & x) {
-            return x.valueType == value.valueType;
+        mImpl->mValues->remove_if([&](const ValueFlow::Value& x) {
+            return sameValueType(x, value);
         });
     }
+
+    // Don't add a value if its already known
+    if (!value.isKnown() && mImpl->mValues &&
+        std::any_of(mImpl->mValues->begin(), mImpl->mValues->end(), [&](const ValueFlow::Value& x) {
+        return x.isKnown() && sameValueType(x, value) && !x.equalValue(value);
+    }))
+        return false;
+
+    // assert(value.isKnown() || !mImpl->mValues || std::none_of(mImpl->mValues->begin(), mImpl->mValues->end(),
+    // [&](const ValueFlow::Value& x) {
+    //     return x.isKnown() && sameValueType(x, value);
+    // }));
 
     if (mImpl->mValues) {
         // Don't handle more than 10 values for performance reasons
@@ -1902,8 +2205,8 @@ bool Token::addValue(const ValueFlow::Value &value)
             return false;
 
         // if value already exists, don't add it again
-        std::list<ValueFlow::Value>::iterator it;
-        for (it = mImpl->mValues->begin(); it != mImpl->mValues->end(); ++it) {
+        auto it = mImpl->mValues->begin();
+        for (; it != mImpl->mValues->end(); ++it) {
             // different types => continue
             if (it->valueType != value.valueType)
                 continue;
@@ -1912,29 +2215,7 @@ bool Token::addValue(const ValueFlow::Value &value)
                 continue;
 
             // different value => continue
-            bool differentValue = true;
-            switch (it->valueType) {
-            case ValueFlow::Value::ValueType::INT:
-            case ValueFlow::Value::ValueType::CONTAINER_SIZE:
-            case ValueFlow::Value::ValueType::BUFFER_SIZE:
-                differentValue = (it->intvalue != value.intvalue);
-                break;
-            case ValueFlow::Value::ValueType::TOK:
-            case ValueFlow::Value::ValueType::LIFETIME:
-                differentValue = (it->tokvalue != value.tokvalue);
-                break;
-            case ValueFlow::Value::ValueType::FLOAT:
-                // TODO: Write some better comparison
-                differentValue = (it->floatValue > value.floatValue || it->floatValue < value.floatValue);
-                break;
-            case ValueFlow::Value::ValueType::MOVED:
-                differentValue = (it->moveKind != value.moveKind);
-                break;
-            case ValueFlow::Value::ValueType::UNINIT:
-                differentValue = false;
-                break;
-            }
-            if (differentValue)
+            if (!it->equalValue(value))
                 continue;
 
             if ((value.isTokValue() || value.isLifetimeValue()) && (it->tokvalue != value.tokvalue) && (it->tokvalue->str() != value.tokvalue->str()))
@@ -1958,15 +2239,16 @@ bool Token::addValue(const ValueFlow::Value &value)
             if (v.varId == 0)
                 v.varId = mImpl->mVarId;
             if (v.isKnown() && v.isIntValue())
-                mImpl->mValues->push_front(v);
+                mImpl->mValues->push_front(std::move(v));
             else
-                mImpl->mValues->push_back(v);
+                mImpl->mValues->push_back(std::move(v));
         }
     } else {
         ValueFlow::Value v(value);
         if (v.varId == 0)
             v.varId = mImpl->mVarId;
-        mImpl->mValues = new std::list<ValueFlow::Value>(1, v);
+        mImpl->mValues = new std::list<ValueFlow::Value>;
+        mImpl->mValues->push_back(std::move(v));
     }
 
     removeContradictions(*mImpl->mValues);
@@ -1981,11 +2263,12 @@ void Token::assignProgressValues(Token *tok)
         ++total_count;
     int count = 0;
     for (Token *tok2 = tok; tok2; tok2 = tok2->next())
-        tok2->mImpl->mProgressValue = count++ * 100 / total_count;
+        tok2->mImpl->mProgressValue = count++ *100 / total_count;
 }
 
 void Token::assignIndexes()
 {
+    // cppcheck-suppress shadowFunction - TODO: fix this
     int index = (mPrevious ? mPrevious->mImpl->mIndex : 0) + 1;
     for (Token *tok = this; tok; tok = tok->next())
         tok->mImpl->mIndex = index++;
@@ -1999,6 +2282,13 @@ void Token::setValueType(ValueType *vt)
     }
 }
 
+const ValueType *Token::argumentType() const {
+    const Token *top = this;
+    while (top && !Token::Match(top->astParent(), ",|("))
+        top = top->astParent();
+    return top ? top->mImpl->mValueType : nullptr;
+}
+
 void Token::type(const ::Type *t)
 {
     mImpl->mType = t;
@@ -2009,72 +2299,158 @@ void Token::type(const ::Type *t)
         tokType(eName);
 }
 
-const ::Type *Token::typeOf(const Token *tok)
+const ::Type* Token::typeOf(const Token* tok, const Token** typeTok)
 {
+    if (!tok)
+        return nullptr;
+    if (typeTok != nullptr)
+        *typeTok = tok;
+    const Token* lhsVarTok{};
+    if (tok->type())
+        return tok->type();
+    if (tok->variable())
+        return tok->variable()->type();
+    if (tok->function())
+        return tok->function()->retType;
     if (Token::simpleMatch(tok, "return")) {
+        // cppcheck-suppress shadowFunction - TODO: fix this
         const Scope *scope = tok->scope();
         if (!scope)
             return nullptr;
+        // cppcheck-suppress shadowFunction - TODO: fix this
         const Function *function = scope->function;
         if (!function)
             return nullptr;
         return function->retType;
-    } else if (Token::Match(tok, "%type%")) {
-        return tok->type();
-    } else if (Token::Match(tok, "%var%")) {
-        const Variable *var = tok->variable();
-        if (!var)
-            return nullptr;
-        return var->type();
-    } else if (Token::Match(tok, "%name%")) {
-        const Function *function = tok->function();
-        if (!function)
-            return nullptr;
-        return function->retType;
-    } else if (Token::simpleMatch(tok, "=")) {
-        return Token::typeOf(tok->astOperand1());
-    } else if (Token::simpleMatch(tok, ".")) {
-        return Token::typeOf(tok->astOperand2());
-    } else if (Token::simpleMatch(tok, "[")) {
-        return Token::typeOf(tok->astOperand1());
     }
+    if (Token::Match(tok->previous(), "%type%|= (|{"))
+        return typeOf(tok->previous(), typeTok);
+    if (Token::simpleMatch(tok, "=") && (lhsVarTok = getLHSVariableToken(tok)) != tok->next())
+        return Token::typeOf(lhsVarTok, typeTok);
+    if (Token::simpleMatch(tok, "."))
+        return Token::typeOf(tok->astOperand2(), typeTok);
+    if (Token::simpleMatch(tok, "["))
+        return Token::typeOf(tok->astOperand1(), typeTok);
+    if (Token::simpleMatch(tok, "{")) {
+        int argnr;
+        const Token* ftok = getTokenArgumentFunction(tok, argnr);
+        if (argnr < 0)
+            return nullptr;
+        if (!ftok)
+            return nullptr;
+        if (ftok == tok)
+            return nullptr;
+        std::vector<const Variable*> vars = getArgumentVars(ftok, argnr);
+        if (vars.empty())
+            return nullptr;
+        if (std::all_of(
+                vars.cbegin(), vars.cend(), [&](const Variable* var) {
+            return var->type() == vars.front()->type();
+        }))
+            return vars.front()->type();
+    }
+
     return nullptr;
 }
 
-std::pair<const Token*, const Token*> Token::typeDecl(const Token * tok)
+std::pair<const Token*, const Token*> Token::typeDecl(const Token* tok, bool pointedToType)
 {
-    if (Token::simpleMatch(tok, "return")) {
-        const Scope *scope = tok->scope();
-        if (!scope)
-            return {};
-        const Function *function = scope->function;
-        if (!function)
-            return {};
-        return {function->retDef, function->returnDefEnd()};
-    } else if (Token::Match(tok, "%type%")) {
+    if (!tok)
+        return {};
+    if (tok->type())
         return {tok, tok->next()};
-    } else if (Token::Match(tok, "%var%")) {
+    if (tok->variable()) {
         const Variable *var = tok->variable();
-        if (!var)
-            return {};
         if (!var->typeStartToken() || !var->typeEndToken())
             return {};
+        if (pointedToType && astIsSmartPointer(var->nameToken())) {
+            const ValueType* vt = var->valueType();
+            if (vt && vt->smartPointerTypeToken)
+                return { vt->smartPointerTypeToken, vt->smartPointerTypeToken->linkAt(-1) };
+        }
+        if (pointedToType && astIsIterator(var->nameToken())) {
+            const ValueType* vt = var->valueType();
+            if (vt && vt->containerTypeToken)
+                return { vt->containerTypeToken, vt->containerTypeToken->linkAt(-1) };
+        }
+        std::pair<const Token*, const Token*> result;
+        if (Token::simpleMatch(var->typeStartToken(), "auto")) {
+            const Token * tok2 = var->declEndToken();
+            if (Token::Match(tok2, "; %varid% =", var->declarationId()))
+                tok2 = tok2->tokAt(2);
+            if (Token::simpleMatch(tok2, "=") && Token::Match(tok2->astOperand2(), "!!=") && tok != tok2->astOperand2()) {
+                tok2 = tok2->astOperand2();
+
+                if (Token::simpleMatch(tok2, "[") && tok2->astOperand1()) {
+                    const ValueType* vt = tok2->astOperand1()->valueType();
+                    if (vt && vt->containerTypeToken)
+                        return { vt->containerTypeToken, vt->containerTypeToken->linkAt(-1) };
+                }
+
+                const Token* varTok = tok2; // try to find a variable
+                if (Token::Match(varTok, ":: %name%"))
+                    varTok = varTok->next();
+                while (Token::Match(varTok, "%name% ::"))
+                    varTok = varTok->tokAt(2);
+                std::pair<const Token*, const Token*> r = typeDecl(varTok);
+                if (r.first)
+                    return r;
+
+                if (pointedToType && tok2->astOperand1() && Token::simpleMatch(tok2, "new")) {
+                    if (Token::simpleMatch(tok2->astOperand1(), "("))
+                        return { tok2->next(), tok2->astOperand1() };
+                    const Token* declEnd = nextAfterAstRightmostLeaf(tok2->astOperand1());
+                    if (Token::simpleMatch(declEnd, "<") && declEnd->link())
+                        declEnd = declEnd->link()->next();
+                    return { tok2->next(), declEnd };
+                }
+                const Token *typeBeg{}, *typeEnd{};
+                if (tok2->str() == "::" && Token::simpleMatch(tok2->astOperand2(), "{")) { // empty initlist
+                    typeBeg = previousBeforeAstLeftmostLeaf(tok2);
+                    typeEnd = tok2->astOperand2();
+                }
+                else if (tok2->str() == "{") {
+                    typeBeg = previousBeforeAstLeftmostLeaf(tok2);
+                    typeEnd = tok2;
+                }
+                if (typeBeg)
+                    result = { typeBeg->next(), typeEnd }; // handle smart pointers/iterators first
+            }
+            if (astIsRangeBasedForDecl(var->nameToken()) && astIsContainer(var->nameToken()->astParent()->astOperand2())) { // range-based for
+                const ValueType* vt = var->nameToken()->astParent()->astOperand2()->valueType();
+                if (vt && vt->containerTypeToken)
+                    return { vt->containerTypeToken, vt->containerTypeToken->linkAt(-1) };
+            }
+        }
+        if (result.first)
+            return result;
         return {var->typeStartToken(), var->typeEndToken()->next()};
-    } else if (Token::Match(tok, "%name%")) {
-        const Function *function = tok->function();
+    }
+    if (Token::simpleMatch(tok, "return")) {
+        // cppcheck-suppress shadowFunction - TODO: fix this
+        const Scope* scope = tok->scope();
+        if (!scope)
+            return {};
+        // cppcheck-suppress shadowFunction - TODO: fix this
+        const Function* function = scope->function;
         if (!function)
             return {};
-        return {function->retDef, function->returnDefEnd()};
-    } else if (Token::simpleMatch(tok, "=")) {
-        return Token::typeDecl(tok->astOperand1());
-    } else if (Token::simpleMatch(tok, ".")) {
-        return Token::typeDecl(tok->astOperand2());
-    } else {
-        const ::Type * t = typeOf(tok);
-        if (!t || !t->classDef)
-            return {};
-        return {t->classDef->next(), t->classDef->tokAt(2)};
+        return { function->retDef, function->returnDefEnd() };
     }
+    if (tok->previous() && tok->previous()->function()) {
+        // cppcheck-suppress shadowFunction - TODO: fix this
+        const Function *function = tok->previous()->function();
+        return {function->retDef, function->returnDefEnd()};
+    }
+    if (Token::simpleMatch(tok, "="))
+        return Token::typeDecl(tok->astOperand1());
+    if (Token::simpleMatch(tok, "."))
+        return Token::typeDecl(tok->astOperand2());
+
+    const ::Type * t = typeOf(tok);
+    if (!t || !t->classDef)
+        return {};
+    return {t->classDef->next(), t->classDef->tokAt(2)};
 }
 std::string Token::typeStr(const Token* tok)
 {
@@ -2092,11 +2468,120 @@ std::string Token::typeStr(const Token* tok)
 
 void Token::scopeInfo(std::shared_ptr<ScopeInfo2> newScopeInfo)
 {
-    mImpl->mScopeInfo = newScopeInfo;
+    mImpl->mScopeInfo = std::move(newScopeInfo);
 }
 std::shared_ptr<ScopeInfo2> Token::scopeInfo() const
 {
     return mImpl->mScopeInfo;
+}
+
+bool Token::hasKnownIntValue() const
+{
+    if (!mImpl->mValues)
+        return false;
+    return std::any_of(mImpl->mValues->begin(), mImpl->mValues->end(), [](const ValueFlow::Value& value) {
+        return value.isKnown() && value.isIntValue();
+    });
+}
+
+bool Token::hasKnownValue() const
+{
+    return mImpl->mValues && std::any_of(mImpl->mValues->begin(), mImpl->mValues->end(), std::mem_fn(&ValueFlow::Value::isKnown));
+}
+
+bool Token::hasKnownValue(ValueFlow::Value::ValueType t) const
+{
+    return mImpl->mValues &&
+           std::any_of(mImpl->mValues->begin(), mImpl->mValues->end(), [&](const ValueFlow::Value& value) {
+        return value.isKnown() && value.valueType == t;
+    });
+}
+
+bool Token::hasKnownSymbolicValue(const Token* tok) const
+{
+    if (tok->exprId() == 0)
+        return false;
+    return mImpl->mValues &&
+           std::any_of(mImpl->mValues->begin(), mImpl->mValues->end(), [&](const ValueFlow::Value& value) {
+        return value.isKnown() && value.isSymbolicValue() && value.tokvalue &&
+        value.tokvalue->exprId() == tok->exprId();
+    });
+}
+
+const ValueFlow::Value* Token::getKnownValue(ValueFlow::Value::ValueType t) const
+{
+    if (!mImpl->mValues)
+        return nullptr;
+    auto it = std::find_if(mImpl->mValues->begin(), mImpl->mValues->end(), [&](const ValueFlow::Value& value) {
+        return value.isKnown() && value.valueType == t;
+    });
+    return it == mImpl->mValues->end() ? nullptr : &*it;
+}
+
+const ValueFlow::Value* Token::getValue(const MathLib::bigint val) const
+{
+    if (!mImpl->mValues)
+        return nullptr;
+    const auto it = std::find_if(mImpl->mValues->begin(), mImpl->mValues->end(), [=](const ValueFlow::Value& value) {
+        return value.isIntValue() && !value.isImpossible() && value.intvalue == val;
+    });
+    return it == mImpl->mValues->end() ? nullptr : &*it;
+}
+
+template<class Compare>
+static const ValueFlow::Value* getCompareValue(const std::list<ValueFlow::Value>& values,
+                                               bool condition,
+                                               MathLib::bigint path,
+                                               Compare compare)
+{
+    const ValueFlow::Value* ret = nullptr;
+    for (const ValueFlow::Value& value : values) {
+        if (!value.isIntValue())
+            continue;
+        if (value.isImpossible())
+            continue;
+        if (path > -0 && value.path != 0 && value.path != path)
+            continue;
+        if ((!ret || compare(value.intvalue, ret->intvalue)) && ((value.condition != nullptr) == condition))
+            ret = &value;
+    }
+    return ret;
+}
+
+const ValueFlow::Value* Token::getMaxValue(bool condition, MathLib::bigint path) const
+{
+    if (!mImpl->mValues)
+        return nullptr;
+    return getCompareValue(*mImpl->mValues, condition, path, std::greater<MathLib::bigint>{});
+}
+
+const ValueFlow::Value* Token::getMinValue(bool condition, MathLib::bigint path) const
+{
+    if (!mImpl->mValues)
+        return nullptr;
+    return getCompareValue(*mImpl->mValues, condition, path, std::less<MathLib::bigint>{});
+}
+
+const ValueFlow::Value* Token::getMovedValue() const
+{
+    if (!mImpl->mValues)
+        return nullptr;
+    const auto it = std::find_if(mImpl->mValues->begin(), mImpl->mValues->end(), [](const ValueFlow::Value& value) {
+        return value.isMovedValue() && !value.isImpossible() &&
+        value.moveKind != ValueFlow::Value::MoveKind::NonMovedVariable;
+    });
+    return it == mImpl->mValues->end() ? nullptr : &*it;
+}
+
+// cppcheck-suppress unusedFunction
+const ValueFlow::Value* Token::getContainerSizeValue(const MathLib::bigint val) const
+{
+    if (!mImpl->mValues)
+        return nullptr;
+    const auto it = std::find_if(mImpl->mValues->begin(), mImpl->mValues->end(), [=](const ValueFlow::Value& value) {
+        return value.isContainerSizeValue() && !value.isImpossible() && value.intvalue == val;
+    });
+    return it == mImpl->mValues->end() ? nullptr : &*it;
 }
 
 TokenImpl::~TokenImpl()
@@ -2105,12 +2590,15 @@ TokenImpl::~TokenImpl()
     delete mValueType;
     delete mValues;
 
-    for (auto *templateSimplifierPointer : mTemplateSimplifierPointers) {
-        templateSimplifierPointer->token(nullptr);
+    if (mTemplateSimplifierPointers) {
+        for (auto *templateSimplifierPointer : *mTemplateSimplifierPointers) {
+            templateSimplifierPointer->token(nullptr);
+        }
     }
+    delete mTemplateSimplifierPointers;
 
     while (mCppcheckAttributes) {
-        struct CppcheckAttributes *c = mCppcheckAttributes;
+        CppcheckAttributes *c = mCppcheckAttributes;
         mCppcheckAttributes = mCppcheckAttributes->next;
         delete c;
     }
@@ -2118,7 +2606,7 @@ TokenImpl::~TokenImpl()
 
 void TokenImpl::setCppcheckAttribute(TokenImpl::CppcheckAttributes::Type type, MathLib::bigint value)
 {
-    struct CppcheckAttributes *attr = mCppcheckAttributes;
+    CppcheckAttributes *attr = mCppcheckAttributes;
     while (attr && attr->type != type)
         attr = attr->next;
     if (attr)
@@ -2132,12 +2620,60 @@ void TokenImpl::setCppcheckAttribute(TokenImpl::CppcheckAttributes::Type type, M
     }
 }
 
-bool TokenImpl::getCppcheckAttribute(TokenImpl::CppcheckAttributes::Type type, MathLib::bigint *value) const
+bool TokenImpl::getCppcheckAttribute(TokenImpl::CppcheckAttributes::Type type, MathLib::bigint &value) const
 {
-    struct CppcheckAttributes *attr = mCppcheckAttributes;
+    CppcheckAttributes *attr = mCppcheckAttributes;
     while (attr && attr->type != type)
         attr = attr->next;
     if (attr)
-        *value = attr->value;
+        value = attr->value;
     return attr != nullptr;
+}
+
+Token* findTypeEnd(Token* tok)
+{
+    while (Token::Match(tok, "%name%|.|::|*|&|&&|<|(|template|decltype|sizeof")) {
+        if (Token::Match(tok, "(|<"))
+            tok = tok->link();
+        if (!tok)
+            return nullptr;
+        tok = tok->next();
+    }
+    return tok;
+}
+
+Token* findLambdaEndScope(Token* tok)
+{
+    if (!Token::simpleMatch(tok, "["))
+        return nullptr;
+    tok = tok->link();
+    if (!Token::Match(tok, "] (|{"))
+        return nullptr;
+    tok = tok->linkAt(1);
+    if (Token::simpleMatch(tok, "}"))
+        return tok;
+    if (Token::simpleMatch(tok, ") {"))
+        return tok->linkAt(1);
+    if (!Token::simpleMatch(tok, ")"))
+        return nullptr;
+    tok = tok->next();
+    while (Token::Match(tok, "mutable|constexpr|consteval|noexcept|.")) {
+        if (Token::simpleMatch(tok, "noexcept ("))
+            tok = tok->linkAt(1);
+        if (Token::simpleMatch(tok, ".")) {
+            tok = findTypeEnd(tok);
+            break;
+        }
+        tok = tok->next();
+    }
+    if (Token::simpleMatch(tok, "{"))
+        return tok->link();
+    return nullptr;
+}
+const Token* findLambdaEndScope(const Token* tok) {
+    return findLambdaEndScope(const_cast<Token*>(tok));
+}
+
+const std::string& Token::fileName() const {
+    return mTokensFrontBack.list.getFiles()[mImpl->mFileIndex];
 }

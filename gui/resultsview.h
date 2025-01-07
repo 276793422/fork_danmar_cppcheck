@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,26 +20,37 @@
 #ifndef RESULTSVIEW_H
 #define RESULTSVIEW_H
 
-
-#include <QWidget>
 #include "report.h"
 #include "showtypes.h"
-#include "ui_resultsview.h"
+
+#include <cstdint>
+
+#include <QObject>
+#include <QString>
+#include <QStringList>
+#include <QWidget>
 
 class ErrorItem;
+class Settings;
 class ApplicationList;
+class ThreadHandler;
 class QModelIndex;
 class QPrinter;
 class QSettings;
 class CheckStatistics;
+class QPoint;
+enum class ReportType : std::uint8_t;
+namespace Ui {
+    class ResultsView;
+}
 
 /// @addtogroup GUI
 /// @{
 
 /**
-* @brief Widget to show cppcheck progressbar and result
-*
-*/
+ * @brief Widget to show cppcheck progressbar and result
+ *
+ */
 class ResultsView : public QWidget {
     Q_OBJECT
 public:
@@ -47,12 +58,8 @@ public:
     explicit ResultsView(QWidget * parent = nullptr);
     void initialize(QSettings *settings, ApplicationList *list, ThreadHandler *checkThreadHandler);
     ResultsView(const ResultsView &) = delete;
-    virtual ~ResultsView();
+    ~ResultsView() override;
     ResultsView &operator=(const ResultsView &) = delete;
-
-    void setTags(const QStringList &tags) {
-        mUI.mTree->setTags(tags);
-    }
 
     /**
      * @brief Clear results and statistics and reset progressinfo.
@@ -71,19 +78,20 @@ public:
     void clearRecheckFile(const QString &filename);
 
     /**
-    * @brief Write statistics in file
-    *
-    * @param filename Filename to save statistics to
-    */
+     * @brief Write statistics in file
+     *
+     * @param filename Filename to save statistics to
+     */
     void saveStatistics(const QString &filename) const;
 
     /**
-    * @brief Save results to a file
-    *
-    * @param filename Filename to save results to
-    * @param type Type of the report.
-    */
-    void save(const QString &filename, Report::Type type) const;
+     * @brief Save results to a file
+     *
+     * @param filename Filename to save results to
+     * @param type Type of the report.
+     * @param productName Custom product name
+     */
+    void save(const QString &filename, Report::Type type, const QString& productName) const;
 
     /**
      * @brief Update results from old report (tag, sinceDate)
@@ -91,15 +99,15 @@ public:
     void updateFromOldReport(const QString &filename) const;
 
     /**
-    * @brief Update tree settings
-    *
-    * @param showFullPath Show full path of files in the tree
-    * @param saveFullPath Save full path of files in reports
-    * @param saveAllErrors Save all visible errors
-    * @param showNoErrorsMessage Show "no errors"?
-    * @param showErrorId Show error id?
-    * @param showInconclusive Show inconclusive?
-    */
+     * @brief Update tree settings
+     *
+     * @param showFullPath Show full path of files in the tree
+     * @param saveFullPath Save full path of files in reports
+     * @param saveAllErrors Save all visible errors
+     * @param showNoErrorsMessage Show "no errors"?
+     * @param showErrorId Show error id?
+     * @param showInconclusive Show inconclusive?
+     */
     void updateSettings(bool showFullPath,
                         bool saveFullPath,
                         bool saveAllErrors,
@@ -118,75 +126,91 @@ public:
     void updateStyleSetting(QSettings *settings);
 
     /**
-    * @brief Set the directory we are checking
-    *
-    * This is used to split error file path to relative if necessary
-    * @param dir Directory we are checking
-    */
+     * @brief Set the directory we are checking
+     *
+     * This is used to split error file path to relative if necessary
+     * @param dir Directory we are checking
+     */
     void setCheckDirectory(const QString &dir);
 
     /**
-    * @brief Get the directory we are checking
-    *
-    * @return Directory containing source files
-    */
+     * @brief Get the directory we are checking
+     *
+     * @return Directory containing source files
+     */
 
-    QString getCheckDirectory();
+    QString getCheckDirectory() const;
 
     /**
-    * @brief Inform the view that checking has started
-    *
-    * @param count Count of files to be checked.
-    */
+     * Set settings used in checking
+     */
+    void setCheckSettings(const Settings& settings);
+
+    /**
+     * @brief Inform the view that checking has started
+     *
+     * @param count Count of files to be checked.
+     */
     void checkingStarted(int count);
 
     /**
-    * @brief Inform the view that checking finished.
-    *
-    */
+     * @brief Inform the view that checking finished.
+     *
+     */
     void checkingFinished();
 
     /**
-    * @brief Do we have visible results to show?
-    *
-    * @return true if there is at least one warning/error to show.
-    */
+     * @brief Do we have visible results to show?
+     *
+     * @return true if there is at least one warning/error to show.
+     */
     bool hasVisibleResults() const;
 
     /**
-    * @brief Do we have results from check?
-    *
-    * @return true if there is at least one warning/error, hidden or visible.
-    */
+     * @brief Do we have results from check?
+     *
+     * @return true if there is at least one warning/error, hidden or visible.
+     */
     bool hasResults() const;
 
     /**
-    * @brief Save View's settings
-    *
-    * @param settings program settings.
-    */
+     * @brief Save View's settings
+     *
+     * @param settings program settings.
+     */
     void saveSettings(QSettings *settings);
 
     /**
-    * @brief Translate this view
-    *
-    */
+     * @brief Translate this view
+     *
+     */
     void translate();
+
+    /**
+     * @brief This function should be called when analysis is stopped
+     */
+    void stopAnalysis();
+
+    /**
+     * @brief Are there successful results?
+     * @return true if analysis finished without critical errors etc
+     */
+    bool isSuccess() const;
 
     void disableProgressbar();
 
     /**
-    * @brief Read errors from report XML file.
-    * @param filename Report file to read.
-    *
-    */
+     * @brief Read errors from report XML file.
+     * @param filename Report file to read.
+     *
+     */
     void readErrorsXml(const QString &filename);
 
     /**
      * @brief Return checking statistics.
      * @return Pointer to checking statistics.
      */
-    CheckStatistics *getStatistics() const {
+    const CheckStatistics *getStatistics() const {
         return mStatistics;
     }
 
@@ -194,123 +218,124 @@ public:
      * @brief Return Showtypes.
      * @return Pointer to Showtypes.
      */
-    ShowTypes * getShowTypes() const {
-        return &mUI.mTree->mShowSeverities;
-    }
+    const ShowTypes & getShowTypes() const;
+
+    void setReportType(ReportType reportType);
 
 signals:
 
     /**
-    * @brief Signal to be emitted when we have results
-    *
-    */
+     * @brief Signal to be emitted when we have results
+     *
+     */
     void gotResults();
 
     /**
-    * @brief Signal that results have been hidden or shown
-    *
-    * @param hidden true if there are some hidden results, or false if there are not
-    */
+     * @brief Signal that results have been hidden or shown
+     *
+     * @param hidden true if there are some hidden results, or false if there are not
+     */
+    // NOLINTNEXTLINE(readability-inconsistent-declaration-parameter-name) - caused by generated MOC code
     void resultsHidden(bool hidden);
 
     /**
-    * @brief Signal to perform recheck of selected files
-    *
-    * @param selectedFilesList list of selected files
-    */
+     * @brief Signal to perform recheck of selected files
+     *
+     * @param selectedFilesList list of selected files
+     */
+    // NOLINTNEXTLINE(readability-inconsistent-declaration-parameter-name) - caused by generated MOC code
     void checkSelected(QStringList selectedFilesList);
 
-    /**
-     * Some results have been tagged
-     */
-    void tagged();
-
     /** Suppress Ids */
+    // NOLINTNEXTLINE(readability-inconsistent-declaration-parameter-name) - caused by generated MOC code
     void suppressIds(QStringList ids);
 
     /**
-    * @brief Show/hide certain type of errors
-    * Refreshes the tree.
-    *
-    * @param type Type of error to show/hide
-    * @param show Should specified errors be shown (true) or hidden (false)
-    */
+     * @brief Show/hide certain type of errors
+     * Refreshes the tree.
+     *
+     * @param type Type of error to show/hide
+     * @param show Should specified errors be shown (true) or hidden (false)
+     */
+    // NOLINTNEXTLINE(readability-inconsistent-declaration-parameter-name) - caused by generated MOC code
     void showResults(ShowTypes::ShowType type, bool show);
 
     /**
-    * @brief Show/hide cppcheck errors.
-    * Refreshes the tree.
-    *
-    * @param show Should specified errors be shown (true) or hidden (false)
-    */
+     * @brief Show/hide cppcheck errors.
+     * Refreshes the tree.
+     *
+     * @param show Should specified errors be shown (true) or hidden (false)
+     */
+    // NOLINTNEXTLINE(readability-inconsistent-declaration-parameter-name) - caused by generated MOC code
     void showCppcheckResults(bool show);
 
     /**
-    * @brief Show/hide clang-tidy/clang-analyzer errors.
-    * Refreshes the tree.
-    *
-    * @param show Should specified errors be shown (true) or hidden (false)
-    */
+     * @brief Show/hide clang-tidy/clang-analyzer errors.
+     * Refreshes the tree.
+     *
+     * @param show Should specified errors be shown (true) or hidden (false)
+     */
+    // NOLINTNEXTLINE(readability-inconsistent-declaration-parameter-name) - caused by generated MOC code
     void showClangResults(bool show);
 
     /**
-    * @brief Collapse all results in the result list.
-    */
+     * @brief Collapse all results in the result list.
+     */
     void collapseAllResults();
 
     /**
-    * @brief Expand all results in the result list.
-    */
+     * @brief Expand all results in the result list.
+     */
     void expandAllResults();
 
     /**
-    * @brief Show hidden results in the result list.
-    */
+     * @brief Show hidden results in the result list.
+     */
     void showHiddenResults();
 
 public slots:
 
     /**
-    * @brief Slot for updating the checking progress
-    *
-    * @param value Current progress value
-    * @param description Description to accompany the progress
-    */
+     * @brief Slot for updating the checking progress
+     *
+     * @param value Current progress value
+     * @param description Description to accompany the progress
+     */
     void progress(int value, const QString& description);
 
     /**
-    * @brief Slot for new error to be displayed
-    *
-    * @param item Error data
-    */
+     * @brief Slot for new error to be displayed
+     *
+     * @param item Error data
+     */
     void error(const ErrorItem &item);
 
     /**
-    * @brief Filters the results in the result list.
-    */
+     * @brief Filters the results in the result list.
+     */
     void filterResults(const QString& filter);
 
     /**
-    * @brief Update detailed message when selected item is changed.
-    *
-    * @param index Position of new selected item.
-    */
+     * @brief Update detailed message when selected item is changed.
+     *
+     * @param index Position of new selected item.
+     */
     void updateDetails(const QModelIndex &index);
 
     /**
-    * @brief Slot opening a print dialog to print the current report
-    */
+     * @brief Slot opening a print dialog to print the current report
+     */
     void print();
 
     /**
-    * @brief Slot printing the current report to the printer.
-    * @param printer The printer used for printing the report.
-    */
-    void print(QPrinter* printer);
+     * @brief Slot printing the current report to the printer.
+     * @param printer The printer used for printing the report.
+     */
+    void print(QPrinter* printer) const;
 
     /**
-    * @brief Slot opening a print preview dialog
-    */
+     * @brief Slot opening a print preview dialog
+     */
     void printPreview();
 
     /**
@@ -322,11 +347,6 @@ public slots:
      * \brief debug message
      */
     void debugError(const ErrorItem &item);
-
-    /**
-     * \brief bughunting report line
-     */
-    void bughuntingReportLine(const QString& line);
 
     /**
      * \brief Clear log messages
@@ -343,15 +363,33 @@ public slots:
      */
     void logCopyComplete();
 
-protected:
-    /**
-    * @brief Should we show a "No errors found dialog" every time no errors were found?
-    */
-    bool mShowNoErrorsMessage;
+private:
 
-    Ui::ResultsView mUI;
+    /**
+     * If provided ErrorItem is a critical error then display warning message
+     * in the resultsview
+     */
+    void handleCriticalError(const ErrorItem& item);
+
+    /**
+     * @brief Should we show a "No errors found dialog" every time no errors were found?
+     */
+    bool mShowNoErrorsMessage = true;
+
+    Ui::ResultsView *mUI;
 
     CheckStatistics *mStatistics;
+
+    Settings* mCheckSettings = nullptr;
+
+    /**
+     * Set to true when checking finish successfully. Set to false whenever analysis starts.
+     */
+    bool mSuccess = false;
+
+    /** Critical error ids */
+    QString mCriticalErrors;
+
 private slots:
     /**
      * @brief Custom context menu for Analysis Log

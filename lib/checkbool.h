@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -41,30 +41,15 @@ class Tokenizer;
 class CPPCHECKLIB CheckBool : public Check {
 public:
     /** @brief This constructor is used when registering the CheckClass */
-    CheckBool() : Check(myName()) {
-    }
+    CheckBool() : Check(myName()) {}
 
+private:
     /** @brief This constructor is used when running checks. */
     CheckBool(const Tokenizer *tokenizer, const Settings *settings, ErrorLogger *errorLogger)
-        : Check(myName(), tokenizer, settings, errorLogger) {
-    }
+        : Check(myName(), tokenizer, settings, errorLogger) {}
 
     /** @brief Run checks against the normal token list */
-    void runChecks(const Tokenizer *tokenizer, const Settings *settings, ErrorLogger *errorLogger) OVERRIDE {
-        CheckBool checkBool(tokenizer, settings, errorLogger);
-
-        // Checks
-        checkBool.checkComparisonOfBoolExpressionWithInt();
-        checkBool.checkComparisonOfBoolWithInt();
-        checkBool.checkAssignBoolToFloat();
-        checkBool.pointerArithBool();
-        checkBool.returnValueOfFunctionReturningBool();
-        checkBool.checkComparisonOfFuncReturningBool();
-        checkBool.checkComparisonOfBoolWithBool();
-        checkBool.checkIncrementBoolean();
-        checkBool.checkAssignBoolToPointer();
-        checkBool.checkBitwiseOnBoolean();
-    }
+    void runChecks(const Tokenizer &tokenizer, ErrorLogger *errorLogger) override;
 
     /** @brief %Check for comparison of function returning bool*/
     void checkComparisonOfFuncReturningBool();
@@ -97,7 +82,6 @@ public:
     /** @brief %Check if a function returning bool returns an integer other than 0 or 1 */
     void returnValueOfFunctionReturningBool();
 
-private:
     // Error messages..
     void comparisonOfFuncReturningBoolError(const Token *tok, const std::string &expression);
     void comparisonOfTwoFuncsReturningBoolError(const Token *tok, const std::string &expression1, const std::string &expression2);
@@ -106,32 +90,18 @@ private:
     void comparisonOfBoolWithInvalidComparator(const Token *tok, const std::string &expression);
     void assignBoolToPointerError(const Token *tok);
     void assignBoolToFloatError(const Token *tok);
-    void bitwiseOnBooleanError(const Token *tok, const std::string &expression, const std::string &op);
-    void comparisonOfBoolExpressionWithIntError(const Token *tok, bool n0o1);
+    void bitwiseOnBooleanError(const Token* tok, const std::string& expression, const std::string& op, bool isCompound = false);
+    void comparisonOfBoolExpressionWithIntError(const Token *tok, bool not0or1);
     void pointerArithBoolError(const Token *tok);
     void returnValueBoolError(const Token *tok);
 
-    void getErrorMessages(ErrorLogger *errorLogger, const Settings *settings) const OVERRIDE {
-        CheckBool c(nullptr, settings, errorLogger);
-
-        c.assignBoolToPointerError(nullptr);
-        c.assignBoolToFloatError(nullptr);
-        c.comparisonOfFuncReturningBoolError(nullptr, "func_name");
-        c.comparisonOfTwoFuncsReturningBoolError(nullptr, "func_name1", "func_name2");
-        c.comparisonOfBoolWithBoolError(nullptr, "var_name");
-        c.incrementBooleanError(nullptr);
-        c.bitwiseOnBooleanError(nullptr, "expression", "&&");
-        c.comparisonOfBoolExpressionWithIntError(nullptr, true);
-        c.pointerArithBoolError(nullptr);
-        c.comparisonOfBoolWithInvalidComparator(nullptr, "expression");
-        c.returnValueBoolError(nullptr);
-    }
+    void getErrorMessages(ErrorLogger *errorLogger, const Settings *settings) const override;
 
     static std::string myName() {
         return "Boolean";
     }
 
-    std::string classInfo() const OVERRIDE {
+    std::string classInfo() const override {
         return "Boolean type checks\n"
                "- using increment on boolean\n"
                "- comparison of a boolean expression with an integer other than 0 or 1\n"

@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,22 +19,31 @@
 #ifndef CODEEDITSTYLEDIALOG_H
 #define CODEEDITSTYLEDIALOG_H
 
-#include <QDialog>
-#include <QPushButton>
 #include "codeeditorstyle.h"
+
+#include <QColor>
+#include <QDialog>
+#include <QFont>
+#include <QObject>
 
 class CodeEditor;
 class SelectColorButton;
 class SelectFontWeightCombo;
+class QPushButton;
+class QWidget;
+class QString;
+
+#if (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
+class QStringList;
+#endif
 
 class StyleEditDialog : public QDialog {
     Q_OBJECT
 public:
     explicit StyleEditDialog(const CodeEditorStyle& newStyle,
                              QWidget *parent = nullptr);
-    virtual ~StyleEditDialog() {}
 
-    CodeEditorStyle getStyle();
+    CodeEditorStyle getStyle() const;
 
 private:
     void updateControls();
@@ -50,20 +59,20 @@ public slots:
     void colorChangedLineNumFG(const QColor& newColor);
     void colorChangedLineNumBG(const QColor& newColor);
     void colorChangedKeywordFG(const QColor& newColor);
-    void weightChangedKeyword(const QFont::Weight& newWeight);
+    void weightChangedKeyword(QFont::Weight newWeight);
     void colorChangedClassFG(const QColor& newColor);
-    void weightChangedClass(const QFont::Weight& newWeight);
+    void weightChangedClass(QFont::Weight newWeight);
     void colorChangedQuoteFG(const QColor& newColor);
-    void weightChangedQuote(const QFont::Weight& newWeight);
+    void weightChangedQuote(QFont::Weight newWeight);
     void colorChangedCommentFG(const QColor& newColor);
-    void weightChangedComment(const QFont::Weight& newWeight);
+    void weightChangedComment(QFont::Weight newWeight);
     void colorChangedSymbolFG(const QColor& newColor);
     void colorChangedSymbolBG(const QColor& newColor);
-    void weightChangedSymbol(const QFont::Weight& newWeight);
+    void weightChangedSymbol(QFont::Weight newWeight);
 
 private:
-    CodeEditorStyle         mStyleIncoming;
-    CodeEditorStyle         mStyleOutgoing;
+    CodeEditorStyle mStyleIncoming;
+    CodeEditorStyle mStyleOutgoing;
 
     CodeEditor              *mSampleEditor;
 
@@ -87,9 +96,9 @@ private:
     QPushButton             *mBtnDefaultLight;
     QPushButton             *mBtnDefaultDark;
 
-    static const QString     mSampleDocument;
+    static const QString mSampleDocument;
     static const QStringList mErrSymbolsList;
-    static const int         mErrLineNum;
+    static const int mErrLineNum;
 };
 
 #endif  //CODEEDITSTYLEDIALOG_H

@@ -1,6 +1,6 @@
 /*
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2018 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,10 +18,16 @@
 
 
 #include "common.h"
+
 #include <QCoreApplication>
-#include <QSettings>
-#include <QFileInfo>
 #include <QDir>
+#include <QFileInfo>
+#include <QList>
+#include <QMap>
+#include <QSettings>
+#include <QStringList>
+#include <QVariant>
+#include <Qt>
 
 
 QString getPath(const QString &type)
@@ -50,7 +56,7 @@ QString toFilterString(const QMap<QString,QString>& filters, bool addAllSupporte
 
     if (addAllSupported) {
         entries << QCoreApplication::translate("toFilterString", "All supported files (%1)")
-                .arg(QStringList(filters.values()).join(" "));
+            .arg(filters.values().join(" "));
     }
 
     if (addAll) {
@@ -65,4 +71,18 @@ QString toFilterString(const QMap<QString,QString>& filters, bool addAllSupporte
     }
 
     return entries.join(";;");
+}
+
+QString getDataDir()
+{
+    QSettings settings;
+    const QString dataDir = settings.value("DATADIR", QString()).toString();
+    if (!dataDir.isEmpty())
+        return dataDir;
+    const QString appPath = QFileInfo(QCoreApplication::applicationFilePath()).canonicalPath();
+    if (QFileInfo::exists(appPath + "/std.cfg"))
+        return appPath;
+    if (appPath.indexOf("/cppcheck/", 0, Qt::CaseInsensitive) > 0)
+        return appPath.left(appPath.indexOf("/cppcheck/", 0, Qt::CaseInsensitive) + 9);
+    return appPath;
 }

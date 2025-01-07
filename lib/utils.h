@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,15 +21,96 @@
 #define utilsH
 //---------------------------------------------------------------------------
 
+#include "config.h"
+
 #include <algorithm>
-#include <cctype>
+#include <array>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <initializer_list>
+#include <limits>
+#include <list>
+#include <stdexcept>
 #include <string>
-#include <stack>
+#include <type_traits>
+#include <vector>
+
+struct SelectMapKeys {
+    template<class Pair>
+    // NOLINTNEXTLINE(readability-const-return-type) - false positive
+    typename Pair::first_type operator()(const Pair& p) const {
+        return p.first;
+    }
+};
+
+struct SelectMapValues {
+    template<class Pair>
+    typename Pair::second_type operator()(const Pair& p) const {
+        return p.second;
+    }
+};
+
+struct OnExit {
+    std::function<void()> f;
+
+    ~OnExit() {
+        f();
+    }
+};
+
+template<class Range, class T>
+bool contains(const Range& r, const T& x)
+{
+    return std::find(r.cbegin(), r.cend(), x) != r.cend();
+}
+
+template<class T>
+bool contains(const std::initializer_list<T>& r, const T& x)
+{
+    return std::find(r.begin(), r.end(), x) != r.end();
+}
+
+template<class T, class U>
+bool contains(const std::initializer_list<T>& r, const U& x)
+{
+    return std::find(r.begin(), r.end(), x) != r.end();
+}
+
+template<class T, class ... Ts>
+inline std::array<T, sizeof...(Ts) + 1> makeArray(T x, Ts... xs)
+{
+    return {std::move(x), std::move(xs)...};
+}
+
+// Enum hash for C++11. This is not needed in C++14
+struct EnumClassHash {
+    template<typename T>
+    std::size_t operator()(T t) const
+    {
+        return static_cast<std::size_t>(t);
+    }
+};
+
+inline bool startsWith(const std::string& str, const char start[], std::size_t startlen)
+{
+    return str.compare(0, startlen, start) == 0;
+}
+
+template<std::size_t N>
+bool startsWith(const std::string& str, const char (&start)[N])
+{
+    return startsWith(str, start, N - 1);
+}
+
+inline bool startsWith(const std::string& str, const std::string& start)
+{
+    return startsWith(str, start.c_str(), start.length());
+}
 
 inline bool endsWith(const std::string &str, char c)
 {
-    return str[str.size()-1U] == c;
+    return !str.empty() && str.back() == c;
 }
 
 inline bool endsWith(const std::string &str, const char end[], std::size_t endlen)
@@ -37,24 +118,43 @@ inline bool endsWith(const std::string &str, const char end[], std::size_t endle
     return (str.size() >= endlen) && (str.compare(str.size()-endlen, endlen, end)==0);
 }
 
+template<std::size_t N>
+bool endsWith(const std::string& str, const char (&end)[N])
+{
+    return endsWith(str, end, N - 1);
+}
+
 inline static bool isPrefixStringCharLiteral(const std::string &str, char q, const std::string& p)
 {
+    // str must be at least the prefix plus the start and end quote
+    if (str.length() < p.length() + 2)
+        return false;
+
+    // check for end quote
     if (!endsWith(str, q))
         return false;
-    if ((str.length() + 1) > p.length() && (str.compare(0, p.size() + 1, p + q) == 0))
-        return true;
-    return false;
+
+    // check for start quote
+    if (str[p.size()] != q)
+        return false;
+
+    // check for prefix
+    if (str.compare(0, p.size(), p) != 0)
+        return false;
+
+    return true;
 }
 
 inline static bool isStringCharLiteral(const std::string &str, char q)
 {
-    for (const std::string & p: {
-    "", "u8", "u", "U", "L"
-}) {
-        if (isPrefixStringCharLiteral(str, q, p))
-            return true;
-    }
-    return false;
+    // early out to avoid the loop
+    if (!endsWith(str, q))
+        return false;
+
+    static const std::array<std::string, 5> suffixes{"", "u8", "u", "U", "L"};
+    return std::any_of(suffixes.cbegin(), suffixes.cend(), [&](const std::string& p) {
+        return isPrefixStringCharLiteral(str, q, p);
+    });
 }
 
 inline static bool isStringLiteral(const std::string &str)
@@ -98,122 +198,220 @@ inline static const char *getOrdinalText(int i)
     return "th";
 }
 
-inline static int caseInsensitiveStringCompare(const std::string &lhs, const std::string &rhs)
-{
-    if (lhs.size() != rhs.size())
-        return (lhs.size() < rhs.size()) ? -1 : 1;
-    for (unsigned int i = 0; i < lhs.size(); ++i) {
-        const int c1 = std::toupper(lhs[i]);
-        const int c2 = std::toupper(rhs[i]);
-        if (c1 != c2)
-            return (c1 < c2) ? -1 : 1;
-    }
-    return 0;
-}
+CPPCHECKLIB int caseInsensitiveStringCompare(const std::string& lhs, const std::string& rhs);
 
-inline static bool isValidGlobPattern(const std::string& pattern)
+CPPCHECKLIB bool isValidGlobPattern(const std::string& pattern);
+
+CPPCHECKLIB bool matchglob(const std::string& pattern, const std::string& name);
+
+CPPCHECKLIB bool matchglobs(const std::vector<std::string> &patterns, const std::string &name);
+
+CPPCHECKLIB void strTolower(std::string& str);
+
+template<typename T, typename std::enable_if<std::is_signed<T>::value, bool>::type=true>
+bool strToInt(const std::string& str, T &num, std::string* err = nullptr)
 {
-    for (std::string::const_iterator i = pattern.begin(); i != pattern.end(); ++i) {
-        if (*i == '*' || *i == '?') {
-            std::string::const_iterator j = i + 1;
-            if (j != pattern.end() && (*j == '*' || *j == '?')) {
-                return false;
-            }
+    long long tmp;
+    try {
+        std::size_t idx = 0;
+        tmp = std::stoll(str, &idx);
+        if (idx != str.size()) {
+            if (err)
+                *err = "not an integer";
+            return false;
         }
+    } catch (const std::out_of_range&) {
+        if (err)
+            *err = "out of range (stoll)";
+        return false;
+    } catch (const std::invalid_argument &) {
+        if (err)
+            *err = "not an integer";
+        return false;
     }
+    if (str.front() == '-' && std::numeric_limits<T>::min() == 0) {
+        if (err)
+            *err = "needs to be positive";
+        return false;
+    }
+    if (tmp < std::numeric_limits<T>::min() || tmp > std::numeric_limits<T>::max()) {
+        if (err)
+            *err = "out of range (limits)";
+        return false;
+    }
+    num = static_cast<T>(tmp);
     return true;
 }
 
-inline static bool matchglob(const std::string& pattern, const std::string& name)
+template<typename T, typename std::enable_if<std::is_unsigned<T>::value, bool>::type=true>
+bool strToInt(const std::string& str, T &num, std::string* err = nullptr)
 {
-    const char* p = pattern.c_str();
-    const char* n = name.c_str();
-    std::stack<std::pair<const char*, const char*> > backtrack;
-
-    for (;;) {
-        bool matching = true;
-        while (*p != '\0' && matching) {
-            switch (*p) {
-            case '*':
-                // Step forward until we match the next character after *
-                while (*n != '\0' && *n != p[1]) {
-                    n++;
-                }
-                if (*n != '\0') {
-                    // If this isn't the last possibility, save it for later
-                    backtrack.push(std::make_pair(p, n));
-                }
-                break;
-            case '?':
-                // Any character matches unless we're at the end of the name
-                if (*n != '\0') {
-                    n++;
-                } else {
-                    matching = false;
-                }
-                break;
-            default:
-                // Non-wildcard characters match literally
-                if (*n == *p) {
-                    n++;
-                } else if (*n == '\\' && *p == '/') {
-                    n++;
-                } else if (*n == '/' && *p == '\\') {
-                    n++;
-                } else {
-                    matching = false;
-                }
-                break;
-            }
-            p++;
-        }
-
-        // If we haven't failed matching and we've reached the end of the name, then success
-        if (matching && *n == '\0') {
-            return true;
-        }
-
-        // If there are no other paths to try, then fail
-        if (backtrack.empty()) {
+    unsigned long long tmp;
+    try {
+        std::size_t idx = 0;
+        tmp = std::stoull(str, &idx);
+        if (idx != str.size()) {
+            if (err)
+                *err = "not an integer";
             return false;
         }
+    } catch (const std::out_of_range&) {
+        if (err)
+            *err = "out of range (stoull)";
+        return false;
+    } catch (const std::invalid_argument &) {
+        if (err)
+            *err = "not an integer";
+        return false;
+    }
+    if (str.front() == '-') {
+        if (err)
+            *err = "needs to be positive";
+        return false;
+    }
+    if (tmp > std::numeric_limits<T>::max()) {
+        if (err)
+            *err = "out of range (limits)";
+        return false;
+    }
+    num = tmp;
+    return true;
+}
 
-        // Restore pointers from backtrack stack
-        p = backtrack.top().first;
-        n = backtrack.top().second;
-        backtrack.pop();
+template<typename T>
+T strToInt(const std::string& str)
+{
+    T tmp = 0;
+    std::string err;
+    if (!strToInt(str, tmp, &err))
+        throw std::runtime_error("converting '" + str + "' to integer failed - " + err);
+    return tmp;
+}
 
-        // Advance name pointer by one because the current position didn't work
-        n++;
+/**
+ *  Simple helper function:
+ * \return size of array
+ * */
+template<typename T, int size>
+// cppcheck-suppress unusedFunction - only used in conditional code
+std::size_t getArrayLength(const T (& /*unused*/)[size])
+{
+    return size;
+}
+
+/**
+ * @brief get id string. i.e. for dump files
+ * it will be a hexadecimal output.
+ */
+static inline std::string id_string_i(std::uintptr_t l)
+{
+    if (!l)
+        return "0";
+
+    static constexpr int ptr_size = sizeof(void*);
+
+    // two characters of each byte / contains terminating \0
+    static constexpr int buf_size = (ptr_size * 2) + 1;
+
+    char buf[buf_size];
+
+    // needs to be signed so we don't underflow in padding loop
+    int idx = buf_size - 1;
+    buf[idx] = '\0';
+
+    while (l != 0)
+    {
+        char c;
+        const std::uintptr_t temp = l % 16; // get the remainder
+        if (temp < 10) {
+            // 0-9
+            c = '0' + temp;
+        }
+        else {
+            // a-f
+            c = 'a' + (temp - 10);
+        }
+        buf[--idx] = c; // store in reverse order
+        l = l / 16;
+    }
+
+    return &buf[idx];
+}
+
+static inline std::string id_string(const void* p)
+{
+    return id_string_i(reinterpret_cast<std::uintptr_t>(p));
+}
+
+static inline const char* bool_to_string(bool b)
+{
+    return b ? "true" : "false";
+}
+
+/**
+ * Remove heading and trailing whitespaces from the input parameter.
+ * If string is all spaces/tabs, return empty string.
+ * @param s The string to trim.
+ * @param t The characters to trim.
+ */
+CPPCHECKLIB std::string trim(const std::string& s, const std::string& t = " \t");
+
+/**
+ * Replace all occurrences of searchFor with replaceWith in the
+ * given source.
+ * @param source The string to modify
+ * @param searchFor What should be searched for
+ * @param replaceWith What will replace the found item
+ */
+CPPCHECKLIB void findAndReplace(std::string &source, const std::string &searchFor, const std::string &replaceWith);
+
+/**
+ * Replace all escape sequences in the given string.
+ * @param source The string that contains escape sequences
+ */
+CPPCHECKLIB std::string replaceEscapeSequences(const std::string &source);
+
+namespace cppcheck
+{
+    NORETURN inline void unreachable()
+    {
+#if defined(__GNUC__)
+        __builtin_unreachable();
+#elif defined(_MSC_VER)
+        __assume(false);
+#else
+#error "no unreachable implementation"
+#endif
     }
 }
 
-#define UNUSED(x) (void)(x)
+template<typename T>
+static inline T* default_if_null(T* p, T* def)
+{
+    return p ? p : def;
+}
 
-// Use the nonneg macro when you want to assert that a variable/argument is not negative
-#ifdef __CPPCHECK__
-#define nonneg   __cppcheck_low__(0)
-#elif defined(NONNEG)
-// Enable non-negative values checking
-// TODO : investigate using annotations/contracts for stronger value checking
-#define nonneg   unsigned
-#else
-// Disable non-negative values checking
-#define nonneg
-#endif
+template<typename T>
+static inline T* empty_if_null(T* p)
+{
+    return default_if_null(p, "");
+}
 
-#if defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define ASAN 1
-#endif
-#endif
+/**
+ * Split string by given sperator.
+ * @param str The string to split
+ * @param sep The seperator
+ * @return The list of seperate strings (including empty ones). The whole input string if no seperator found.
+ */
+CPPCHECKLIB std::list<std::string> splitString(const std::string& str, char sep);
 
-#ifndef ASAN
-#ifdef  __SANITIZE_ADDRESS__
-#define ASAN 1
-#else
-#define ASAN 0
-#endif
-#endif
+namespace utils {
+    template<class T>
+    constexpr typename std::add_const<T>::type & as_const(T& t) noexcept
+    {
+        // NOLINTNEXTLINE(bugprone-return-const-ref-from-parameter) - potential false positive
+        return t;
+    }
+}
 
 #endif

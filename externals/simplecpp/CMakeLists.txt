@@ -2,10 +2,10 @@ file(GLOB hdrs "*.h")
 file(GLOB srcs "*.cpp")
 
 add_library(simplecpp_objs OBJECT ${srcs} ${hdrs})
-# TODO: conflicts with ANALYZE_* options
-if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    add_library(simplecpp_objs_sanitized OBJECT EXCLUDE_FROM_ALL ${srcs} ${hdrs})
-    target_compile_options(simplecpp_objs_sanitized PRIVATE -fsanitize=address)
+if (BUILD_CORE_DLL)
+    target_compile_definitions(simplecpp_objs PRIVATE SIMPLECPP_EXPORT)
 endif()
 
-
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options_safe(simplecpp_objs -Wno-zero-as-null-pointer-constant)
+endif()

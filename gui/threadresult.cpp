@@ -1,6 +1,6 @@
 /*
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,38 +16,29 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <QFile>
-#include <QString>
-#include <QMutexLocker>
-#include <QList>
-#include <QStringList>
-#include <QDebug>
+#include "threadresult.h"
+
 #include "common.h"
 #include "erroritem.h"
 #include "errorlogger.h"
-#include "threadresult.h"
+#include "errortypes.h"
+#include "importproject.h"
 
-ThreadResult::ThreadResult() : QObject(), ErrorLogger(), mMaxProgress(0), mProgress(0), mFilesChecked(0), mTotalFiles(0)
-{
-    //ctor
-}
+#include <numeric>
 
-ThreadResult::~ThreadResult()
-{
-    //dtor
-}
+#include <QFile>
 
-void ThreadResult::reportOut(const std::string &outmsg)
+void ThreadResult::reportOut(const std::string &outmsg, Color /*c*/)
 {
     emit log(QString::fromStdString(outmsg));
 }
 
 void ThreadResult::fileChecked(const QString &file)
 {
-    QMutexLocker locker(&mutex);
+    std::lock_guard<std::mutex> locker(mutex);
 
     mProgress += QFile(file).size();
-    mFilesChecked ++;
+    mFilesChecked++;
 
     if (mMaxProgress > 0) {
         const int value = static_cast<int>(PROGRESS_MAX * mProgress / mMaxProgress);
@@ -57,9 +48,9 @@ void ThreadResult::fileChecked(const QString &file)
     }
 }
 
-void ThreadResult::reportErr(const ErrorLogger::ErrorMessage &msg)
+void ThreadResult::reportErr(const ErrorMessage &msg)
 {
-    QMutexLocker locker(&mutex);
+    std::lock_guard<std::mutex> locker(mutex);
     const ErrorItem item(msg);
     if (msg.severity != Severity::debug)
         emit error(item);
@@ -69,7 +60,7 @@ void ThreadResult::reportErr(const ErrorLogger::ErrorMessage &msg)
 
 QString ThreadResult::getNextFile()
 {
-    QMutexLocker locker(&mutex);
+    std::lock_guard<std::mutex> locker(mutex);
     if (mFiles.isEmpty()) {
         return QString();
     }
@@ -77,20 +68,20 @@ QString ThreadResult::getNextFile()
     return mFiles.takeFirst();
 }
 
-ImportProject::FileSettings ThreadResult::getNextFileSettings()
+void ThreadResult::getNextFileSettings(const FileSettings*& fs)
 {
-    QMutexLocker locker(&mutex);
-    if (mFileSettings.empty()) {
-        return ImportProject::FileSettings();
+    std::lock_guard<std::mutex> locker(mutex);
+    fs = nullptr;
+    if (mItNextFileSettings == mFileSettings.cend()) {
+        return;
     }
-    const ImportProject::FileSettings fs = mFileSettings.front();
-    mFileSettings.pop_front();
-    return fs;
+    fs = &(*mItNextFileSettings);
+    ++mItNextFileSettings;
 }
 
 void ThreadResult::setFiles(const QStringList &files)
 {
-    QMutexLocker locker(&mutex);
+    std::lock_guard<std::mutex> locker(mutex);
     mFiles = files;
     mProgress = 0;
     mFilesChecked = 0;
@@ -98,49 +89,41 @@ void ThreadResult::setFiles(const QStringList &files)
 
     // Determine the total size of all of the files to check, so that we can
     // show an accurate progress estimate
-    quint64 sizeOfFiles = 0;
-    foreach (const QString& file, files) {
-        sizeOfFiles += QFile(file).size();
-    }
+    quint64 sizeOfFiles = std::accumulate(files.begin(), files.end(), 0, [](quint64 total, const QString& file) {
+        return total + QFile(file).size();
+    });
     mMaxProgress = sizeOfFiles;
 }
 
 void ThreadResult::setProject(const ImportProject &prj)
 {
-    QMutexLocker locker(&mutex);
+    std::lock_guard<std::mutex> locker(mutex);
     mFiles.clear();
     mFileSettings = prj.fileSettings;
+    mItNextFileSettings = mFileSettings.cbegin();
     mProgress = 0;
     mFilesChecked = 0;
     mTotalFiles = prj.fileSettings.size();
 
     // Determine the total size of all of the files to check, so that we can
     // show an accurate progress estimate
-    quint64 sizeOfFiles = 0;
-    foreach (const ImportProject::FileSettings& fs, prj.fileSettings) {
-        sizeOfFiles += QFile(QString::fromStdString(fs.filename)).size();
-    }
-    mMaxProgress = sizeOfFiles;
+    mMaxProgress = std::accumulate(prj.fileSettings.begin(), prj.fileSettings.end(), quint64{ 0 }, [](quint64 v, const FileSettings& fs) {
+        return v + QFile(QString::fromStdString(fs.filename())).size();
+    });
 }
 
 void ThreadResult::clearFiles()
 {
-    QMutexLocker locker(&mutex);
+    std::lock_guard<std::mutex> locker(mutex);
     mFiles.clear();
     mFileSettings.clear();
+    mItNextFileSettings = mFileSettings.cend();
     mFilesChecked = 0;
     mTotalFiles = 0;
 }
 
 int ThreadResult::getFileCount() const
 {
-    QMutexLocker locker(&mutex);
+    std::lock_guard<std::mutex> locker(mutex);
     return mFiles.size() + mFileSettings.size();
-}
-
-void ThreadResult::bughuntingReport(const std::string &str)
-{
-    if (str.empty())
-        return;
-    emit bughuntingReportLine(QString::fromStdString(str));
 }

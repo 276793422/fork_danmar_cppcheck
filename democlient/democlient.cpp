@@ -1,11 +1,38 @@
+/*
+ * Cppcheck - A tool for static C/C++ code analysis
+ * Copyright (C) 2007-2024 Cppcheck team.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "cppcheck.h"
+#include "errorlogger.h"
+#include "errortypes.h"
+#include "filesettings.h"
+#include "settings.h"
+#include "version.h"
+
+#include <algorithm>
 #include <ctime>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <string>
 
-#include "cppcheck.h"
-#include "version.h"
+enum class Color : std::uint8_t;
 
 static void unencode(const char *src, char *dest)
 {
@@ -35,17 +62,17 @@ public:
     CppcheckExecutor()
         : ErrorLogger()
         , stoptime(std::time(nullptr)+2U)
-        , cppcheck(*this, false) {
+        , cppcheck(*this, false, nullptr) {
         cppcheck.settings().addEnabled("all");
-        cppcheck.settings().inconclusive = true;
+        cppcheck.settings().certainty.enable(Certainty::inconclusive);
     }
 
     void run(const char code[]) {
-        cppcheck.check("test.cpp", code);
+        cppcheck.check(FileWithDetails("test.cpp"), code);
     }
 
-    void reportOut(const std::string &outmsg) override { }
-    void reportErr(const ErrorLogger::ErrorMessage &msg) override {
+    void reportOut(const std::string & /*outmsg*/, Color /*c*/) override {}
+    void reportErr(const ErrorMessage &msg) override {
         const std::string s = msg.toString(true);
 
         std::cout << s << std::endl;
@@ -54,12 +81,12 @@ public:
             std::fprintf(logfile, "%s\n", s.c_str());
     }
 
-    void reportProgress(const std::string& filename,
-                        const char stage[],
-                        const std::size_t value) override {
+    void reportProgress(const std::string& /*filename*/,
+                        const char /*stage*/[],
+                        const std::size_t /*value*/) override {
         if (std::time(nullptr) >= stoptime) {
             std::cout << "Time to analyse the code exceeded 2 seconds. Terminating.\n\n";
-            cppcheck.terminate();
+            Settings::terminate();
         }
     }
 };

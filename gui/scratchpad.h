@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2017 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,29 +20,38 @@
 #define SCRATCHPAD_H
 
 #include <QDialog>
-#include "ui_scratchpad.h"
+#include <QObject>
 
 class MainWindow;
+namespace Ui {
+    class ScratchPad;
+}
 
 /// @addtogroup GUI
 /// @{
 
 /**
-* @brief A window with a text field that .
-*/
+ * @brief A window with a text field that .
+ */
 class ScratchPad : public QDialog {
     Q_OBJECT
 public:
     explicit ScratchPad(MainWindow& mainWindow);
+    ~ScratchPad() override;
+
+    /**
+     * @brief Translate dialog
+     */
+    void translate();
 
 private slots:
     /**
-    * @brief Called when check button is clicked.
-    */
+     * @brief Called when check button is clicked.
+     */
     void checkButtonClicked();
 
 private:
-    Ui::ScratchPad mUI;
+    Ui::ScratchPad *mUI;
     MainWindow& mMainWindow;
 };
 

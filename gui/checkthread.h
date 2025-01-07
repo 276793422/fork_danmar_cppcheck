@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,64 +20,66 @@
 #ifndef CHECKTHREAD_H
 #define CHECKTHREAD_H
 
-#include <QThread>
-#include "cppcheck.h"
+#include "settings.h"
 #include "suppressions.h"
 
-class Settings;
+#include <atomic>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include <QList>
+#include <QObject>
+#include <QString>
+#include <QStringList>
+#include <QThread>
+
 class ThreadResult;
+struct FileSettings;
 
 /// @addtogroup GUI
 /// @{
 
 /**
-* @brief Thread to run cppcheck
-*
-*/
+ * @brief Thread to run cppcheck
+ *
+ */
 class CheckThread : public QThread {
     Q_OBJECT
 public:
     explicit CheckThread(ThreadResult &result);
-    virtual ~CheckThread();
 
     /**
-    * @brief Set settings for cppcheck
-    *
-    * @param settings settings for cppcheck
-    */
-    void check(const Settings &settings);
+     * @brief Set settings for cppcheck
+     *
+     * @param settings settings for cppcheck
+     */
+    void setSettings(const Settings &settings);
 
     /**
-    * @brief Run whole program analysis
-    * @param files    All files
-    */
-    void analyseWholeProgram(const QStringList &files);
+     * @brief Run whole program analysis
+     * @param files    All files
+     * @param ctuInfo  Ctu info for addons
+     */
+    void analyseWholeProgram(const QStringList &files, const std::string& ctuInfo);
 
     void setAddonsAndTools(const QStringList &addonsAndTools) {
         mAddonsAndTools = addonsAndTools;
-    }
-
-    void setMisraFile(const QString &misraFile) {
-        mMisraFile = misraFile;
-    }
-
-    void setDataDir(const QString &dataDir) {
-        mDataDir = dataDir;
     }
 
     void setClangIncludePaths(const QStringList &s) {
         mClangIncludePaths = s;
     }
 
-    void setSuppressions(const QList<Suppressions::Suppression> &s) {
+    void setSuppressions(const QList<SuppressionList::Suppression> &s) {
         mSuppressions = s;
     }
 
     /**
-    * @brief method that is run in a thread
-    *
-    */
-    void run();
+     * @brief method that is run in a thread
+     *
+     */
+    void run() override;
 
     void stop();
 
@@ -93,37 +95,28 @@ public:
      */
     static QString clangTidyCmd();
 
-    /**
-     * Determine command to run python
-     * \return Command to run python, empty if it is not found
-     */
-    static QString pythonCmd();
-
-    /**
-     * Look for addon and return path
-     * \return path to addon if found, empty if it is not found
-     */
-    static QString getAddonFilePath(const QString &dataDir, const QString &addonFile);
+    static int executeCommand(std::string exe, std::vector<std::string> args, std::string redirect, std::string &output);
 
 signals:
 
     /**
-    * @brief cpp checking is done
-    *
-    */
+     * @brief cpp checking is done
+     *
+     */
     void done();
 
+    // NOLINTNEXTLINE(readability-inconsistent-declaration-parameter-name) - caused by generated MOC code
     void fileChecked(const QString &file);
 protected:
 
     /**
-    * @brief States for the check thread.
-    * Whole purpose of these states is to allow stopping of the checking. When
-    * stopping we say for the thread (Stopping) that stop when current check
-    * has been completed. Thread must be stopped cleanly, just terminating thread
-    * likely causes unpredictable side-effects.
-    */
-    enum State {
+     * @brief States for the check thread.
+     * Whole purpose of these states is to allow stopping of the checking. When
+     * stopping we say for the thread (Stopping) that stop when current check
+     * has been completed. Thread must be stopped cleanly, just terminating thread
+     * likely causes unpredictable side-effects.
+     */
+    enum State : std::uint8_t {
         Running, /**< The thread is checking. */
         Stopping, /**< The thread will stop after current work. */
         Stopped, /**< The thread has been stopped. */
@@ -131,31 +124,27 @@ protected:
     };
 
     /**
-    * @brief Thread's current execution state.
-    */
-    State mState;
+     * @brief Thread's current execution state. Can be changed from outside
+     */
+    std::atomic<State> mState{Ready};
 
     ThreadResult &mResult;
-    /**
-    * @brief Cppcheck itself
-    */
-    CppCheck mCppcheck;
+
+    Settings mSettings;
 
 private:
-    void runAddonsAndTools(const ImportProject::FileSettings *fileSettings, const QString &fileName);
+    void runAddonsAndTools(const Settings& settings, const FileSettings *fileSettings, const QString &fileName);
 
-    void parseAddonErrors(QString err, const QString &tool);
     void parseClangErrors(const QString &tool, const QString &file0, QString err);
 
-    bool isSuppressed(const Suppressions::ErrorMessage &errorMessage) const;
+    bool isSuppressed(const SuppressionList::ErrorMessage &errorMessage) const;
 
     QStringList mFiles;
-    bool mAnalyseWholeProgram;
+    bool mAnalyseWholeProgram{};
+    std::string mCtuInfo;
     QStringList mAddonsAndTools;
-    QString mDataDir;
     QStringList mClangIncludePaths;
-    QList<Suppressions::Suppression> mSuppressions;
-    QString mMisraFile;
+    QList<SuppressionList::Suppression> mSuppressions;
 };
 /// @}
 #endif // CHECKTHREAD_H

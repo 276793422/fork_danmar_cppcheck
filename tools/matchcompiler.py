@@ -1,7 +1,7 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Cppcheck - A tool for static C/C++ code analysis
-# Copyright (C) 2007-2019 Cppcheck team.
+# Copyright (C) 2007-2021 Cppcheck team.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -24,6 +24,77 @@ import glob
 import argparse
 import errno
 
+tokTypes = {
+    '+': ['eArithmeticalOp'],
+    '-': ['eArithmeticalOp'],
+    '*': ['eArithmeticalOp'],
+    '/': ['eArithmeticalOp'],
+    '%': ['eArithmeticalOp'],
+    '>>': ['eArithmeticalOp'],
+    '<<': ['eArithmeticalOp'],
+    '=': ['eAssignmentOp'],
+    '+=': ['eAssignmentOp'],
+    '-=': ['eAssignmentOp'],
+    '*=': ['eAssignmentOp'],
+    '/=': ['eAssignmentOp'],
+    '%=': ['eAssignmentOp'],
+    '&=': ['eAssignmentOp'],
+    '|=': ['eAssignmentOp'],
+    '^=': ['eAssignmentOp'],
+    '&': ['eBitOp'],
+    '^': ['eBitOp'],
+    '~': ['eBitOp'],
+    'true': ['eBoolean'],
+    'false': ['eBoolean'],
+    '{': ['eBracket'],
+    '}': ['eBracket'],
+    '<': ['eBracket', 'eComparisonOp'],
+    '>': ['eBracket', 'eComparisonOp'],
+    '==': ['eComparisonOp'],
+    '!=': ['eComparisonOp'],
+    '<=': ['eComparisonOp'],
+    '>=': ['eComparisonOp'],
+    '<=>': ['eComparisonOp'],
+    '...': ['eEllipsis'],
+    ',': ['eExtendedOp'],
+    '?': ['eExtendedOp'],
+    ':': ['eExtendedOp'],
+    '(': ['eExtendedOp'],
+    ')': ['eExtendedOp'],
+    '[': ['eExtendedOp', 'eLambda'],
+    ']': ['eExtendedOp', 'eLambda'],
+    '++': ['eIncDecOp'],
+    '--': ['eIncDecOp'],
+    'asm': ['eKeyword'],
+    'auto': ['eKeyword', 'eType'],
+    'break': ['eKeyword'],
+    'case': ['eKeyword'],
+    'const': ['eKeyword'],
+    'continue': ['eKeyword'],
+    'default': ['eKeyword'],
+    'do': ['eKeyword'],
+    'else': ['eKeyword'],
+    'enum': ['eKeyword'],
+    'extern': ['eKeyword'],
+    'for': ['eKeyword'],
+    'goto': ['eKeyword'],
+    'if': ['eKeyword'],
+    'inline': ['eKeyword'],
+    'register': ['eKeyword'],
+    'restrict': ['eKeyword'],
+    'return': ['eKeyword'],
+    'sizeof': ['eKeyword'],
+    'static': ['eKeyword'],
+    'struct': ['eKeyword'],
+    'switch': ['eKeyword'],
+    'typedef': ['eKeyword'],
+    'union': ['eKeyword'],
+    'volatile': ['eKeyword'],
+    'while': ['eKeyword'],
+    'void': ['eKeyword', 'eType'],
+    '&&': ['eLogicalOp'],
+    '!': ['eLogicalOp']
+}
 
 class MatchCompiler:
 
@@ -87,39 +158,41 @@ class MatchCompiler:
     def _compileCmd(tok):
         if tok == '%any%':
             return 'true'
-        elif tok == '%assign%':
+        if tok == '%assign%':
             return 'tok->isAssignmentOp()'
-        elif tok == '%bool%':
+        if tok == '%bool%':
             return 'tok->isBoolean()'
-        elif tok == '%char%':
-            return '(tok->tokType()==Token::eChar)'
-        elif tok == '%comp%':
+        if tok == '%char%':
+            return '(tok->tokType() == Token::eChar)'
+        if tok == '%comp%':
             return 'tok->isComparisonOp()'
-        elif tok == '%num%':
+        if tok == '%num%':
             return 'tok->isNumber()'
-        elif tok == '%cop%':
+        if tok == '%cop%':
             return 'tok->isConstOp()'
-        elif tok == '%op%':
+        if tok == '%op%':
             return 'tok->isOp()'
-        elif tok == '%or%':
-            return '(tok->tokType() == Token::eBitOp && tok->str()==MatchCompiler::makeConstString("|") )'
-        elif tok == '%oror%':
-            return '(tok->tokType() == Token::eLogicalOp && tok->str()==MatchCompiler::makeConstString("||"))'
-        elif tok == '%str%':
-            return '(tok->tokType()==Token::eString)'
-        elif tok == '%type%':
-            return '(tok->isName() && tok->varId()==0U && !tok->isKeyword())'
-        elif tok == '%name%':
+        if tok == '%or%':
+            return '(tok->tokType() == Token::eBitOp && tok->str() == MatchCompiler::makeConstString("|") )'
+        if tok == '%oror%':
+            return '(tok->tokType() == Token::eLogicalOp && tok->str() == MatchCompiler::makeConstString("||"))'
+        if tok == '%str%':
+            return '(tok->tokType() == Token::eString)'
+        if tok == '%type%':
+            return '(tok->isName() && tok->varId() == 0U)'
+        if tok == '%name%':
             return 'tok->isName()'
-        elif tok == '%var%':
+        if tok == '%var%':
             return '(tok->varId() != 0)'
-        elif tok == '%varid%':
-            return '(tok->isName() && tok->varId()==varid)'
-        elif (len(tok) > 2) and (tok[0] == "%"):
+        if tok == '%varid%':
+            return '(tok->isName() && tok->varId() == varid)'
+        if (len(tok) > 2) and (tok[0] == "%"):
             print("unhandled:" + tok)
-
+        elif tok in tokTypes:
+            cond = ' || '.join(['tok->tokType() == Token::{}'.format(tokType) for tokType in tokTypes[tok]])
+            return '(({cond}) && tok->str() == MatchCompiler::makeConstString("{tok}"))'.format(cond=cond, tok=tok)
         return (
-            '(tok->str()==MatchCompiler::makeConstString("' + tok + '"))'
+            '(tok->str() == MatchCompiler::makeConstString("' + tok + '"))'
         )
 
     def _compilePattern(self, pattern, nr, varid,
@@ -133,7 +206,7 @@ class MatchCompiler:
                 arg2 = ', const int varid'
 
             ret = '// pattern: ' + pattern + '\n'
-            ret += 'static bool match' + \
+            ret += 'static inline bool match' + \
                 str(nr) + '(' + tokenType + '* tok' + arg2 + ') {\n'
             returnStatement = 'return false;\n'
 
@@ -155,7 +228,7 @@ class MatchCompiler:
 
             # [abc]
             if (len(tok) > 2) and (tok[0] == '[') and (tok[-1] == ']'):
-                ret += '    if (!tok || tok->str().size()!=1U || !strchr("' + tok[1:-1] + '", tok->str()[0]))\n'
+                ret += '    if (!tok || tok->str().size() != 1U || !strchr("' + tok[1:-1] + '", tok->str()[0]))\n'
                 ret += '        ' + returnStatement
 
             # a|b|c
@@ -186,7 +259,7 @@ class MatchCompiler:
             elif tok[0:2] == "!!":
                 ret += '    if (tok && tok->str() == MatchCompiler::makeConstString("' + tok[2:] + '"))\n'
                 ret += '        ' + returnStatement
-                gotoNextToken = '    tok = tok ? tok->next() : NULL;\n'
+                gotoNextToken = '    tok = tok ? tok->next() : nullptr;\n'
 
             else:
                 negatedTok = "!" + self._compileCmd(tok)
@@ -217,14 +290,14 @@ class MatchCompiler:
             more_args += ', int varid'
 
         ret = '// pattern: ' + pattern + '\n'
-        ret += 'template<class T> static T * findmatch' + \
+        ret += 'template<class T> static inline T * findmatch' + \
             str(findmatchnr) + '(T * start_tok' + more_args + ') {\n'
         ret += '    for (; start_tok' + endCondition + \
             '; start_tok = start_tok->next()) {\n'
 
         ret += self._compilePattern(pattern, -1, varId, True, 'T')
         ret += '    }\n'
-        ret += '    return NULL;\n}\n'
+        ret += '    return nullptr;\n}\n'
 
         return ret
 
@@ -300,7 +373,7 @@ class MatchCompiler:
         if varId:
             more_args = ', const int varid'
 
-        ret = 'static bool match_verify' + \
+        ret = 'static inline bool match_verify' + \
             str(verifyNumber) + '(const Token *tok' + more_args + ') {\n'
 
         origMatchName = 'Match'
@@ -330,8 +403,8 @@ class MatchCompiler:
         # ret += '            std::cout << "tok: " << tok->str();\n'
         # ret += '        if (tok->next())\n'
         # ret += '            std::cout << "tok next: " << tok->next()->str();\n'
-        ret += '        throw InternalError(tok, "Internal error.' +\
-            'compiled match returned different result than parsed match: ' + pattern + '");\n'
+        ret += '        throw InternalError(tok, "Internal error. ' +\
+            'Compiled match returned different result than parsed match: ' + pattern + '");\n'
         ret += '    }\n'
         ret += '    return res_compiled_match;\n'
         ret += '}\n'
@@ -380,44 +453,50 @@ class MatchCompiler:
         )
 
     def _replaceTokenMatch(self, line, linenr, filename):
-        while True:
-            is_simplematch = False
-            pos1 = line.find('Token::Match(')
-            if pos1 == -1:
-                is_simplematch = True
-                pos1 = line.find('Token::simpleMatch(')
-            if pos1 == -1:
-                break
+        for func in ('Match', 'simpleMatch'):
+            is_simplematch = func == 'simpleMatch'
+            pattern_start = 0
+            while True:
+                # skip comments
+                if line.strip().startswith('//'):
+                    break
 
-            res = self.parseMatch(line, pos1)
-            if res is None:
-                break
+                pos1 = line.find('Token::' + func + '(', pattern_start)
+                if pos1 == -1:
+                    break
 
-            # assert that Token::Match has either 2 or 3 arguments
-            assert(len(res) == 3 or len(res) == 4)
+                res = self.parseMatch(line, pos1)
+                if res is None:
+                    break
 
-            end_pos = len(res[0])
-            tok = res[1]
-            raw_pattern = res[2]
-            varId = None
-            if len(res) == 4:
-                varId = res[3]
+                # assert that Token::Match has either 2 or 3 arguments
+                assert(len(res) == 3 or len(res) == 4)
 
-            res = re.match(r'\s*"((?:.|\\")*?)"\s*$', raw_pattern)
-            if res is None:
-                if self._showSkipped:
-                    print(filename + ":" + str(linenr) + " skipping match pattern:" + raw_pattern)
-                break  # Non-const pattern - bailout
+                end_pos = len(res[0])
+                tok = res[1]
+                raw_pattern = res[2]
+                varId = None
+                if len(res) == 4:
+                    varId = res[3]
 
-            pattern = res.group(1)
-            line = self._replaceSpecificTokenMatch(
-                is_simplematch,
-                line,
-                pos1,
-                end_pos,
-                pattern,
-                tok,
-                varId)
+                pattern_start = pos1 + end_pos
+                res = re.match(r'\s*"((?:.|\\")*?)"\s*$', raw_pattern)
+                if res is None:
+                    if self._showSkipped:
+                        print(filename + ":" + str(linenr) + " skipping match pattern:" + raw_pattern)
+                    continue # Non-const pattern - bailout
+
+                pattern = res.group(1)
+                orig_len = len(line)
+                line = self._replaceSpecificTokenMatch(
+                    is_simplematch,
+                    line,
+                    pos1,
+                    end_pos,
+                    pattern,
+                    tok,
+                    varId)
+                pattern_start += len(line) - orig_len
 
         return line
 
@@ -430,7 +509,7 @@ class MatchCompiler:
         if varId:
             more_args += ', const int varid'
 
-        ret = 'template < class T > static T * findmatch_verify' + \
+        ret = 'template < class T > static inline T * findmatch_verify' + \
             str(verifyNumber) + '(T * tok' + more_args + ') {\n'
 
         origFindMatchName = 'findmatch'
@@ -459,7 +538,7 @@ class MatchCompiler:
         # We also need to verify builds in 'release' mode
         ret += '    if (res_parsed_findmatch != res_compiled_findmatch) {\n'
         ret += '        throw InternalError(tok, "Internal error. ' +\
-            'compiled findmatch returned different result than parsed findmatch: ' + pattern + '");\n'
+            'Compiled findmatch returned different result than parsed findmatch: ' + pattern + '");\n'
         ret += '    }\n'
         ret += '    return res_compiled_findmatch;\n'
         ret += '}\n'
@@ -600,20 +679,20 @@ class MatchCompiler:
     def convertFile(self, srcname, destname, line_directive):
         self._reset()
 
-        fin = io.open(srcname, "rt", encoding="utf-8")
-        srclines = fin.readlines()
-        fin.close()
+        with io.open(srcname, "rt", encoding="utf-8") as fin:
+            srclines = fin.readlines()
 
-        header = '#include "token.h"\n'
-        header += '#include "errorlogger.h"\n'
-        header += '#include "matchcompiler.h"\n'
-        header += '#include <string>\n'
-        header += '#include <cstring>\n'
-        # header += '#include <iostream>\n'
         code = ''
+
+        modified = False
 
         linenr = 0
         for line in srclines:
+            if not modified:
+                line_orig = line
+            else:
+                line_orig = None
+
             linenr += 1
             # Compile Token::Match and Token::simpleMatch
             line = self._replaceTokenMatch(line, linenr, srcname)
@@ -624,20 +703,31 @@ class MatchCompiler:
             # Cache plain C-strings in C++ strings
             line = self._replaceCStrings(line)
 
+            if not modified and not line_orig == line:
+                modified = True
+
             code += line
 
         # Compute matchFunctions
-        strFunctions = ''
-        for function in self._rawMatchFunctions:
-            strFunctions += function
+        strFunctions = ''.join(self._rawMatchFunctions)
 
         lineno = ''
         if line_directive:
             lineno = '#line 1 "' + srcname + '"\n'
 
-        fout = io.open(destname, 'wt', encoding="utf-8")
-        fout.write(header + strFunctions + lineno + code)
-        fout.close()
+        header = '#include "matchcompiler.h"\n'
+        header += '#include <string>\n'
+        header += '#include <cstring>\n'
+        if len(self._rawMatchFunctions):
+            header += '#include "errorlogger.h"\n'
+            header += '#include "token.h"\n'
+
+        with io.open(destname, 'wt', encoding="utf-8") as fout:
+            if modified or len(self._rawMatchFunctions):
+                fout.write(header)
+                fout.write(strFunctions)
+            fout.write(lineno)
+            fout.write(code)
 
 
 def main():
@@ -668,7 +758,7 @@ def main():
 
     # Check if we are invoked from the right place
     if not os.path.exists(lib_dir):
-        print('Directory "' + lib_dir + '"not found.')
+        print('Directory "' + lib_dir + '" not found.')
         sys.exit(-1)
 
     # Create build directory if needed

@@ -1,6 +1,6 @@
 /*
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,18 +20,27 @@
 //---------------------------------------------------------------------------
 #include "checktype.h"
 
-#include "errorlogger.h"
+#include "astutils.h"
+#include "errortypes.h"
 #include "mathlib.h"
 #include "platform.h"
 #include "settings.h"
+#include "standards.h"
 #include "symboldatabase.h"
 #include "token.h"
 #include "tokenize.h"
+#include "valueflow.h"
+#include "vfvalue.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <iterator>
 #include <list>
-#include <ostream>
-#include <stack>
+#include <sstream>
+#include <utility>
+#include <vector>
+
 //---------------------------------------------------------------------------
 
 // Register this check class (by creating a static instance of it)
@@ -45,22 +54,26 @@ namespace {
 //
 
 // CWE ids used:
-static const struct CWE CWE195(195U);   // Signed to Unsigned Conversion Error
-static const struct CWE CWE197(197U);   // Numeric Truncation Error
-static const struct CWE CWE758(758U);   // Reliance on Undefined, Unspecified, or Implementation-Defined Behavior
-static const struct CWE CWE190(190U);   // Integer Overflow or Wraparound
+static const CWE CWE195(195U);   // Signed to Unsigned Conversion Error
+static const CWE CWE197(197U);   // Numeric Truncation Error
+static const CWE CWE758(758U);   // Reliance on Undefined, Unspecified, or Implementation-Defined Behavior
+static const CWE CWE190(190U);   // Integer Overflow or Wraparound
 
 
 void CheckType::checkTooBigBitwiseShift()
 {
     // unknown sizeof(int) => can't run this checker
-    if (mSettings->platformType == Settings::Unspecified)
+    if (mSettings->platform.type == Platform::Type::Unspecified)
         return;
+
+    logChecker("CheckType::checkTooBigBitwiseShift"); // platform
 
     for (const Token *tok = mTokenizer->tokens(); tok; tok = tok->next()) {
         // C++ and macro: OUT(x<<y)
-        if (mTokenizer->isCPP() && Token::Match(tok, "[;{}] %name% (") && Token::simpleMatch(tok->linkAt(2), ") ;") && tok->next()->isUpperCaseName() && !tok->next()->function())
+        if (tok->isCpp() && Token::Match(tok, "[;{}] %name% (") && Token::simpleMatch(tok->linkAt(2), ") ;") && tok->next()->isUpperCaseName() && !tok->next()->function())
             tok = tok->linkAt(2);
+
+        tok = skipUnreachableBranch(tok);
 
         if (!tok->astOperand1() || !tok->astOperand2())
             continue;
@@ -81,20 +94,20 @@ void CheckType::checkTooBigBitwiseShift()
             (lhstype->type == ValueType::Type::WCHAR_T) ||
             (lhstype->type == ValueType::Type::BOOL) ||
             (lhstype->type == ValueType::Type::INT))
-            lhsbits = mSettings->int_bit;
+            lhsbits = mSettings->platform.int_bit;
         else if (lhstype->type == ValueType::Type::LONG)
-            lhsbits = mSettings->long_bit;
+            lhsbits = mSettings->platform.long_bit;
         else if (lhstype->type == ValueType::Type::LONGLONG)
-            lhsbits = mSettings->long_long_bit;
+            lhsbits = mSettings->platform.long_long_bit;
         else
             continue;
 
         // Get biggest rhs value. preferably a value which doesn't have 'condition'.
-        const ValueFlow::Value * value = tok->astOperand2()->getValueGE(lhsbits, mSettings);
+        const ValueFlow::Value * value = tok->astOperand2()->getValueGE(lhsbits, *mSettings);
         if (value && mSettings->isEnabled(value, false))
             tooBigBitwiseShiftError(tok, lhsbits, *value);
         else if (lhstype->sign == ValueType::Sign::SIGNED) {
-            value = tok->astOperand2()->getValueGE(lhsbits-1, mSettings);
+            value = tok->astOperand2()->getValueGE(lhsbits-1, *mSettings);
             if (value && mSettings->isEnabled(value, false))
                 tooBigSignedBitwiseShiftError(tok, lhsbits, *value);
         }
@@ -103,10 +116,10 @@ void CheckType::checkTooBigBitwiseShift()
 
 void CheckType::tooBigBitwiseShiftError(const Token *tok, int lhsbits, const ValueFlow::Value &rhsbits)
 {
-    const char id[] = "shiftTooManyBits";
+    constexpr char id[] = "shiftTooManyBits";
 
     if (!tok) {
-        reportError(tok, Severity::error, id, "Shifting 32-bit value by 40 bits is undefined behaviour", CWE758, false);
+        reportError(tok, Severity::error, id, "Shifting 32-bit value by 40 bits is undefined behaviour", CWE758, Certainty::normal);
         return;
     }
 
@@ -117,23 +130,30 @@ void CheckType::tooBigBitwiseShiftError(const Token *tok, int lhsbits, const Val
     if (rhsbits.condition)
         errmsg << ". See condition at line " << rhsbits.condition->linenr() << ".";
 
-    reportError(errorPath, rhsbits.errorSeverity() ? Severity::error : Severity::warning, id, errmsg.str(), CWE758, rhsbits.isInconclusive());
+    reportError(errorPath, rhsbits.errorSeverity() ? Severity::error : Severity::warning, id, errmsg.str(), CWE758, rhsbits.isInconclusive() ? Certainty::inconclusive : Certainty::normal);
 }
 
 void CheckType::tooBigSignedBitwiseShiftError(const Token *tok, int lhsbits, const ValueFlow::Value &rhsbits)
 {
-    const char id[] = "shiftTooManyBitsSigned";
+    constexpr char id[] = "shiftTooManyBitsSigned";
 
-    const bool cpp14 = mSettings->standards.cpp >= Standards::CPP14;
+    const bool cpp14 = ((tok && tok->isCpp()) || (mTokenizer && mTokenizer->isCPP())) && (mSettings->standards.cpp >= Standards::CPP14);
 
     std::string behaviour = "undefined";
     if (cpp14)
         behaviour = "implementation-defined";
     if (!tok) {
-        reportError(tok, Severity::error, id, "Shifting signed 32-bit value by 31 bits is " + behaviour + " behaviour", CWE758, false);
+        reportError(tok, Severity::error, id, "Shifting signed 32-bit value by 31 bits is " + behaviour + " behaviour", CWE758, Certainty::normal);
         return;
     }
 
+
+    Severity severity = rhsbits.errorSeverity() ? Severity::error : Severity::warning;
+    if (cpp14)
+        severity = Severity::portability;
+
+    if ((severity == Severity::portability) && !mSettings->severity.isEnabled(Severity::portability))
+        return;
     const ErrorPath errorPath = getErrorPath(tok, &rhsbits, "Shift");
 
     std::ostringstream errmsg;
@@ -141,13 +161,7 @@ void CheckType::tooBigSignedBitwiseShiftError(const Token *tok, int lhsbits, con
     if (rhsbits.condition)
         errmsg << ". See condition at line " << rhsbits.condition->linenr() << ".";
 
-    Severity::SeverityType severity = rhsbits.errorSeverity() ? Severity::error : Severity::warning;
-    if (cpp14)
-        severity = Severity::portability;
-
-    if ((severity == Severity::portability) && !mSettings->isEnabled(Settings::PORTABILITY))
-        return;
-    reportError(errorPath, severity, id, errmsg.str(), CWE758, rhsbits.isInconclusive());
+    reportError(errorPath, severity, id, errmsg.str(), CWE758, rhsbits.isInconclusive() ? Certainty::inconclusive : Certainty::normal);
 }
 
 //---------------------------------------------------------------------------
@@ -157,8 +171,10 @@ void CheckType::tooBigSignedBitwiseShiftError(const Token *tok, int lhsbits, con
 void CheckType::checkIntegerOverflow()
 {
     // unknown sizeof(int) => can't run this checker
-    if (mSettings->platformType == Settings::Unspecified || mSettings->int_bit >= MathLib::bigint_bits)
+    if (mSettings->platform.type == Platform::Type::Unspecified || mSettings->platform.int_bit >= MathLib::bigint_bits)
         return;
+
+    logChecker("CheckType::checkIntegerOverflow"); // platform
 
     for (const Token *tok = mTokenizer->tokens(); tok; tok = tok->next()) {
         if (!tok->isArithmeticalOp())
@@ -171,11 +187,11 @@ void CheckType::checkIntegerOverflow()
 
         unsigned int bits;
         if (vt->type == ValueType::Type::INT)
-            bits = mSettings->int_bit;
+            bits = mSettings->platform.int_bit;
         else if (vt->type == ValueType::Type::LONG)
-            bits = mSettings->long_bit;
+            bits = mSettings->platform.long_bit;
         else if (vt->type == ValueType::Type::LONGLONG)
-            bits = mSettings->long_long_bit;
+            bits = mSettings->platform.long_long_bit;
         else
             continue;
 
@@ -183,12 +199,15 @@ void CheckType::checkIntegerOverflow()
             continue;
 
         // max value according to platform settings.
-        const MathLib::bigint maxvalue = (((MathLib::bigint)1) << (bits - 1)) - 1;
+        const MathLib::bigint maxvalue = (((MathLib::biguint)1) << (bits - 1)) - 1;
 
         // is there a overflow result value
-        const ValueFlow::Value *value = tok->getValueGE(maxvalue + 1, mSettings);
-        if (!value)
-            value = tok->getValueLE(-maxvalue - 2, mSettings);
+        bool isOverflow = true;
+        const ValueFlow::Value *value = tok->getValueGE(maxvalue + 1, *mSettings);
+        if (!value) {
+            value = tok->getValueLE(-maxvalue - 2, *mSettings);
+            isOverflow = false;
+        }
         if (!value || !mSettings->isEnabled(value,false))
             continue;
 
@@ -196,30 +215,31 @@ void CheckType::checkIntegerOverflow()
         if (tok->str() == "<<" && value->intvalue > 0 && value->intvalue < (((MathLib::bigint)1) << bits))
             continue;
 
-        integerOverflowError(tok, *value);
+        integerOverflowError(tok, *value, isOverflow);
     }
 }
 
-void CheckType::integerOverflowError(const Token *tok, const ValueFlow::Value &value)
+void CheckType::integerOverflowError(const Token *tok, const ValueFlow::Value &value, bool isOverflow)
 {
     const std::string expr(tok ? tok->expressionString() : "");
+    const std::string type = isOverflow ? "overflow" : "underflow";
 
     std::string msg;
     if (value.condition)
         msg = ValueFlow::eitherTheConditionIsRedundant(value.condition) +
-              " or there is signed integer overflow for expression '" + expr + "'.";
+              " or there is signed integer " + type + " for expression '" + expr + "'.";
     else
-        msg = "Signed integer overflow for expression '" + expr + "'.";
+        msg = "Signed integer " + type + " for expression '" + expr + "'.";
 
     if (value.safe)
         msg = "Safe checks: " + msg;
 
-    reportError(getErrorPath(tok, &value, "Integer overflow"),
+    reportError(getErrorPath(tok, &value, "Integer " + type),
                 value.errorSeverity() ? Severity::error : Severity::warning,
                 getMessageId(value, "integerOverflow").c_str(),
                 msg,
                 CWE190,
-                value.isInconclusive());
+                value.isInconclusive() ? Certainty::inconclusive : Certainty::normal);
 }
 
 //---------------------------------------------------------------------------
@@ -228,8 +248,10 @@ void CheckType::integerOverflowError(const Token *tok, const ValueFlow::Value &v
 
 void CheckType::checkSignConversion()
 {
-    if (!mSettings->isEnabled(Settings::WARNING))
+    if (!mSettings->severity.isEnabled(Severity::warning))
         return;
+
+    logChecker("CheckType::checkSignConversion"); // warning
 
     for (const Token *tok = mTokenizer->tokens(); tok; tok = tok->next()) {
         if (!tok->isArithmeticalOp() || Token::Match(tok,"+|-"))
@@ -240,15 +262,14 @@ void CheckType::checkSignConversion()
             continue;
 
         // Check if an operand can be negative..
-        std::stack<const Token *> tokens;
-        tokens.push(tok->astOperand1());
-        tokens.push(tok->astOperand2());
-        while (!tokens.empty()) {
-            const Token *tok1 = tokens.top();
-            tokens.pop();
+        const Token * astOperands[] = { tok->astOperand1(), tok->astOperand2() };
+        for (const Token * tok1 : astOperands) {
             if (!tok1)
                 continue;
-            const ValueFlow::Value *negativeValue = tok1->getValueLE(-1,mSettings);
+            const ValueFlow::Value* negativeValue =
+                ValueFlow::findValue(tok1->values(), *mSettings, [&](const ValueFlow::Value& v) {
+                return !v.isImpossible() && v.isIntValue() && (v.intvalue <= -1 || v.wideintvalue <= -1);
+            });
             if (!negativeValue)
                 continue;
             if (tok1->valueType() && tok1->valueType()->sign != ValueType::Sign::UNSIGNED)
@@ -270,7 +291,7 @@ void CheckType::signConversionError(const Token *tok, const ValueFlow::Value *ne
         msg << "Expression '" << expr << "' can have a negative value. That is converted to an unsigned value and used in an unsigned calculation.";
 
     if (!negativeValue)
-        reportError(tok, Severity::warning, "signConversion", msg.str(), CWE195, false);
+        reportError(tok, Severity::warning, "signConversion", msg.str(), CWE195, Certainty::normal);
     else {
         const ErrorPath &errorPath = getErrorPath(tok,negativeValue,"Negative value is converted to an unsigned value");
         reportError(errorPath,
@@ -278,7 +299,7 @@ void CheckType::signConversionError(const Token *tok, const ValueFlow::Value *ne
                     Check::getMessageId(*negativeValue, "signConversion").c_str(),
                     msg.str(),
                     CWE195,
-                    negativeValue->isInconclusive());
+                    negativeValue->isInconclusive() ? Certainty::inconclusive : Certainty::normal);
     }
 }
 
@@ -286,20 +307,45 @@ void CheckType::signConversionError(const Token *tok, const ValueFlow::Value *ne
 //---------------------------------------------------------------------------
 // Checking for long cast of int result   const long x = var1 * var2;
 //---------------------------------------------------------------------------
+static bool checkTypeCombination(ValueType src, ValueType tgt, const Settings& settings)
+{
+    static const std::pair<ValueType::Type, ValueType::Type> typeCombinations[] = {
+        { ValueType::Type::INT, ValueType::Type::LONG },
+        { ValueType::Type::INT, ValueType::Type::LONGLONG },
+        { ValueType::Type::LONG, ValueType::Type::LONGLONG },
+        { ValueType::Type::FLOAT, ValueType::Type::DOUBLE },
+        { ValueType::Type::FLOAT, ValueType::Type::LONGDOUBLE },
+        { ValueType::Type::DOUBLE, ValueType::Type::LONGDOUBLE },
+    };
+
+    src.reference = Reference::None;
+    tgt.reference = Reference::None;
+
+    const std::size_t sizeSrc = ValueFlow::getSizeOf(src, settings);
+    const std::size_t sizeTgt = ValueFlow::getSizeOf(tgt, settings);
+    if (!(sizeSrc > 0 && sizeTgt > 0 && sizeSrc < sizeTgt))
+        return false;
+
+    return std::any_of(std::begin(typeCombinations), std::end(typeCombinations), [&](const std::pair<ValueType::Type, ValueType::Type>& p) {
+        return src.type == p.first && tgt.type == p.second;
+    });
+}
 
 void CheckType::checkLongCast()
 {
-    if (!mSettings->isEnabled(Settings::STYLE))
+    if (!mSettings->severity.isEnabled(Severity::style) && !mSettings->isPremiumEnabled("truncLongCastAssignment"))
         return;
+
+    logChecker("CheckType::checkLongCast"); // style
 
     // Assignments..
     for (const Token *tok = mTokenizer->tokens(); tok; tok = tok->next()) {
-        if (tok->str() != "=" || !Token::Match(tok->astOperand2(), "*|<<"))
+        if (tok->str() != "=" || !Token::Match(tok->astOperand2(), "*|<<") || tok->astOperand2()->isUnaryOp("*"))
             continue;
 
         if (tok->astOperand2()->hasKnownIntValue()) {
             const ValueFlow::Value &v = tok->astOperand2()->values().front();
-            if (mSettings->isIntValue(v.intvalue))
+            if (mSettings->platform.isIntValue(v.intvalue))
                 continue;
         }
 
@@ -308,16 +354,15 @@ void CheckType::checkLongCast()
 
         if (!lhstype || !rhstype)
             continue;
+        if (!checkTypeCombination(*rhstype, *lhstype, *mSettings))
+            continue;
 
         // assign int result to long/longlong const nonpointer?
-        if (rhstype->type == ValueType::Type::INT &&
-            rhstype->pointer == 0U &&
+        if (rhstype->pointer == 0U &&
             rhstype->originalTypeName.empty() &&
-            (lhstype->type == ValueType::Type::LONG || lhstype->type == ValueType::Type::LONGLONG) &&
             lhstype->pointer == 0U &&
-            lhstype->constness == 1U &&
             lhstype->originalTypeName.empty())
-            longCastAssignError(tok);
+            longCastAssignError(tok, rhstype, lhstype);
     }
 
     // Return..
@@ -326,16 +371,9 @@ void CheckType::checkLongCast()
 
         // function must return long data
         const Token * def = scope->classDef;
-        bool islong = false;
-        while (Token::Match(def, "%type%|::")) {
-            if (def->str() == "long" && def->originalName().empty()) {
-                islong = true;
-                break;
-            }
-            def = def->previous();
-        }
-        if (!islong)
+        if (!Token::Match(def, "%name% (") || !def->next()->valueType())
             continue;
+        const ValueType* retVt = def->next()->valueType();
 
         // return statements
         const Token *ret = nullptr;
@@ -343,7 +381,9 @@ void CheckType::checkLongCast()
             if (tok->str() == "return") {
                 if (Token::Match(tok->astOperand1(), "<<|*")) {
                     const ValueType *type = tok->astOperand1()->valueType();
-                    if (type && type->type == ValueType::Type::INT && type->pointer == 0U && type->originalTypeName.empty())
+                    if (type && checkTypeCombination(*type, *retVt, *mSettings) &&
+                        type->pointer == 0U &&
+                        type->originalTypeName.empty())
                         ret = tok;
                 }
                 // All return statements must have problem otherwise no warning
@@ -355,26 +395,41 @@ void CheckType::checkLongCast()
         }
 
         if (ret)
-            longCastReturnError(ret);
+            longCastReturnError(ret, ret->astOperand1()->valueType(), retVt);
     }
 }
 
-void CheckType::longCastAssignError(const Token *tok)
+static void makeBaseTypeString(std::string& typeStr)
 {
+    const auto pos = typeStr.find("signed");
+    if (pos != std::string::npos)
+        typeStr.erase(typeStr.begin(), typeStr.begin() + pos + 6 + 1);
+}
+
+void CheckType::longCastAssignError(const Token *tok, const ValueType* src, const ValueType* tgt)
+{
+    std::string srcStr = src ? src->str() : "int";
+    makeBaseTypeString(srcStr);
+    std::string tgtStr = tgt ? tgt->str() : "long";
+    makeBaseTypeString(tgtStr);
     reportError(tok,
                 Severity::style,
                 "truncLongCastAssignment",
-                "int result is assigned to long variable. If the variable is long to avoid loss of information, then you have loss of information.\n"
-                "int result is assigned to long variable. If the variable is long to avoid loss of information, then there is loss of information. To avoid loss of information you must cast a calculation operand to long, for example 'l = a * b;' => 'l = (long)a * b;'.", CWE197, false);
+                srcStr + " result is assigned to " + tgtStr + " variable. If the variable is " + tgtStr + " to avoid loss of information, then you have loss of information.\n" +
+                srcStr + " result is assigned to " + tgtStr + " variable. If the variable is " + tgtStr + " to avoid loss of information, then there is loss of information. To avoid loss of information you must cast a calculation operand to " + tgtStr + ", for example 'l = a * b;' => 'l = (" + tgtStr + ")a * b;'.", CWE197, Certainty::normal);
 }
 
-void CheckType::longCastReturnError(const Token *tok)
+void CheckType::longCastReturnError(const Token *tok, const ValueType* src, const ValueType* tgt)
 {
+    std::string srcStr = src ? src->str() : "int";
+    makeBaseTypeString(srcStr);
+    std::string tgtStr = tgt ? tgt->str() : "long";
+    makeBaseTypeString(tgtStr);
     reportError(tok,
                 Severity::style,
                 "truncLongCastReturn",
-                "int result is returned as long value. If the return value is long to avoid loss of information, then you have loss of information.\n"
-                "int result is returned as long value. If the return value is long to avoid loss of information, then there is loss of information. To avoid loss of information you must cast a calculation operand to long, for example 'return a*b;' => 'return (long)a*b'.", CWE197, false);
+                srcStr +" result is returned as " + tgtStr + " value. If the return value is " + tgtStr + " to avoid loss of information, then you have loss of information.\n" +
+                srcStr +" result is returned as " + tgtStr + " value. If the return value is " + tgtStr + " to avoid loss of information, then there is loss of information. To avoid loss of information you must cast a calculation operand to long, for example 'return a*b;' => 'return (long)a*b'.", CWE197, Certainty::normal);
 }
 
 //---------------------------------------------------------------------------
@@ -383,41 +438,45 @@ void CheckType::longCastReturnError(const Token *tok)
 
 void CheckType::checkFloatToIntegerOverflow()
 {
+    logChecker("CheckType::checkFloatToIntegerOverflow");
+
     for (const Token *tok = mTokenizer->tokens(); tok; tok = tok->next()) {
         const ValueType *vtint, *vtfloat;
-        const std::list<ValueFlow::Value> *floatValues;
 
         // Explicit cast
         if (Token::Match(tok, "( %name%") && tok->astOperand1() && !tok->astOperand2()) {
+            if (isUnreachableOperand(tok))
+                continue;
             vtint = tok->valueType();
             vtfloat = tok->astOperand1()->valueType();
-            floatValues = &tok->astOperand1()->values();
-            checkFloatToIntegerOverflow(tok, vtint, vtfloat, floatValues);
+            checkFloatToIntegerOverflow(tok, vtint, vtfloat, tok->astOperand1()->values());
         }
 
         // Assignment
         else if (tok->str() == "=" && tok->astOperand1() && tok->astOperand2()) {
+            if (isUnreachableOperand(tok))
+                continue;
             vtint = tok->astOperand1()->valueType();
             vtfloat = tok->astOperand2()->valueType();
-            floatValues = &tok->astOperand2()->values();
-            checkFloatToIntegerOverflow(tok, vtint, vtfloat, floatValues);
+            checkFloatToIntegerOverflow(tok, vtint, vtfloat, tok->astOperand2()->values());
         }
 
         else if (tok->str() == "return" && tok->astOperand1() && tok->astOperand1()->valueType() && tok->astOperand1()->valueType()->isFloat()) {
+            if (isUnreachableOperand(tok))
+                continue;
             const Scope *scope = tok->scope();
             while (scope && scope->type != Scope::ScopeType::eLambda && scope->type != Scope::ScopeType::eFunction)
                 scope = scope->nestedIn;
             if (scope && scope->type == Scope::ScopeType::eFunction && scope->function && scope->function->retDef) {
-                const ValueType &valueType = ValueType::parseDecl(scope->function->retDef, mSettings);
+                const ValueType &valueType = ValueType::parseDecl(scope->function->retDef, *mSettings);
                 vtfloat = tok->astOperand1()->valueType();
-                floatValues = &tok->astOperand1()->values();
-                checkFloatToIntegerOverflow(tok, &valueType, vtfloat, floatValues);
+                checkFloatToIntegerOverflow(tok, &valueType, vtfloat, tok->astOperand1()->values());
             }
         }
     }
 }
 
-void CheckType::checkFloatToIntegerOverflow(const Token *tok, const ValueType *vtint, const ValueType *vtfloat, const std::list<ValueFlow::Value> *floatValues)
+void CheckType::checkFloatToIntegerOverflow(const Token *tok, const ValueType *vtint, const ValueType *vtfloat, const std::list<ValueFlow::Value> &floatValues)
 {
     // Conversion of float to integer?
     if (!vtint || !vtint->isIntegral())
@@ -425,27 +484,27 @@ void CheckType::checkFloatToIntegerOverflow(const Token *tok, const ValueType *v
     if (!vtfloat || !vtfloat->isFloat())
         return;
 
-    for (const ValueFlow::Value &f : *floatValues) {
+    for (const ValueFlow::Value &f : floatValues) {
         if (f.valueType != ValueFlow::Value::ValueType::FLOAT)
             continue;
         if (!mSettings->isEnabled(&f, false))
             continue;
-        if (f.floatValue > ~0ULL)
+        if (f.floatValue >= std::exp2(mSettings->platform.long_long_bit))
             floatToIntegerOverflowError(tok, f);
-        else if ((-f.floatValue) > (1ULL<<62))
+        else if ((-f.floatValue) > std::exp2(mSettings->platform.long_long_bit - 1))
             floatToIntegerOverflowError(tok, f);
-        else if (mSettings->platformType != Settings::Unspecified) {
+        else if (mSettings->platform.type != Platform::Type::Unspecified) {
             int bits = 0;
             if (vtint->type == ValueType::Type::CHAR)
-                bits = mSettings->char_bit;
+                bits = mSettings->platform.char_bit;
             else if (vtint->type == ValueType::Type::SHORT)
-                bits = mSettings->short_bit;
+                bits = mSettings->platform.short_bit;
             else if (vtint->type == ValueType::Type::INT)
-                bits = mSettings->int_bit;
+                bits = mSettings->platform.int_bit;
             else if (vtint->type == ValueType::Type::LONG)
-                bits = mSettings->long_bit;
+                bits = mSettings->platform.long_bit;
             else if (vtint->type == ValueType::Type::LONGLONG)
-                bits = mSettings->long_long_bit;
+                bits = mSettings->platform.long_long_bit;
             else
                 continue;
             if (bits < MathLib::bigint_bits && f.floatValue >= (((MathLib::biguint)1) << bits))
@@ -461,5 +520,31 @@ void CheckType::floatToIntegerOverflowError(const Token *tok, const ValueFlow::V
     reportError(getErrorPath(tok, &value, "float to integer conversion"),
                 value.errorSeverity() ? Severity::error : Severity::warning,
                 "floatConversionOverflow",
-                errmsg.str(), CWE190, value.isInconclusive());
+                errmsg.str(), CWE190, value.isInconclusive() ? Certainty::inconclusive : Certainty::normal);
+}
+
+void CheckType::runChecks(const Tokenizer &tokenizer, ErrorLogger *errorLogger)
+{
+    // These are not "simplified" because casts can't be ignored
+    CheckType checkType(&tokenizer, &tokenizer.getSettings(), errorLogger);
+    checkType.checkTooBigBitwiseShift();
+    checkType.checkIntegerOverflow();
+    checkType.checkSignConversion();
+    checkType.checkLongCast();
+    checkType.checkFloatToIntegerOverflow();
+}
+
+void CheckType::getErrorMessages(ErrorLogger *errorLogger, const Settings *settings) const
+{
+    CheckType c(nullptr, settings, errorLogger);
+    c.tooBigBitwiseShiftError(nullptr, 32, ValueFlow::Value(64));
+    c.tooBigSignedBitwiseShiftError(nullptr, 31, ValueFlow::Value(31));
+    c.integerOverflowError(nullptr, ValueFlow::Value(1LL<<32));
+    c.signConversionError(nullptr, nullptr, false);
+    c.longCastAssignError(nullptr);
+    c.longCastReturnError(nullptr);
+    ValueFlow::Value f;
+    f.valueType = ValueFlow::Value::ValueType::FLOAT;
+    f.floatValue = 1E100;
+    c.floatToIntegerOverflowError(nullptr, f);
 }

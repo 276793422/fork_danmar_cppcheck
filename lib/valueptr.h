@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,12 +22,12 @@
 //---------------------------------------------------------------------------
 
 #include "config.h"
-#include <functional>
+
 #include <memory>
 
-template <class T>
+template<class T>
 class CPPCHECKLIB ValuePtr {
-    template <class U>
+    template<class U>
     struct cloner {
         static T* apply(const T* x) {
             return new U(*static_cast<const U*>(x));
@@ -41,8 +41,9 @@ public:
 
     ValuePtr() : mPtr(nullptr), mClone() {}
 
-    template <class U>
+    template<class U>
     // cppcheck-suppress noExplicitConstructor
+    // NOLINTNEXTLINE(google-explicit-constructor)
     ValuePtr(const U& value) : mPtr(cloner<U>::apply(&value)), mClone(&cloner<U>::apply)
     {}
 
@@ -51,13 +52,11 @@ public:
             mPtr.reset(mClone(rhs.get()));
         }
     }
-    ValuePtr(ValuePtr&& rhs) : mPtr(std::move(rhs.mPtr)), mClone(std::move(rhs.mClone)) {}
+    ValuePtr(ValuePtr&& rhs) NOEXCEPT : mPtr(std::move(rhs.mPtr)), mClone(std::move(rhs.mClone)) {}
 
-    pointer release() {
-        return mPtr.release();
+    T* get() NOEXCEPT {
+        return mPtr.get();
     }
-
-    T* get() NOEXCEPT { return mPtr.get(); }
     const T* get() const NOEXCEPT {
         return mPtr.get();
     }
@@ -69,26 +68,28 @@ public:
         return *get();
     }
 
-    T* operator->() NOEXCEPT { return get(); }
+    T* operator->() NOEXCEPT {
+        return get();
+    }
     const T* operator->() const NOEXCEPT {
         return get();
     }
 
-    void swap(ValuePtr& rhs) {
+    void swap(ValuePtr& rhs) NOEXCEPT {
         using std::swap;
         swap(mPtr, rhs.mPtr);
         swap(mClone, rhs.mClone);
     }
 
-    ValuePtr<T>& operator=(ValuePtr rhs) {
+    ValuePtr<T>& operator=(ValuePtr rhs) & {
         swap(rhs);
         return *this;
     }
 
+    // NOLINTNEXTLINE(google-explicit-constructor)
     operator bool() const NOEXCEPT {
         return !!mPtr;
     }
-    ~ValuePtr() {}
 
 private:
     std::shared_ptr<T> mPtr;

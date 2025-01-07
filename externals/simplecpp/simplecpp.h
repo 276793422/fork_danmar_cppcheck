@@ -1,27 +1,14 @@
-/*
+/* -*- C++ -*-
  * simplecpp - A simple and high-fidelity C/C++ preprocessor library
- * Copyright (C) 2016 Daniel Marjamäki.
- *
- * This library is free software: you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation, either
- * version 3 of the License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library.  If not, see <http://www.gnu.org/licenses/>.
+ * Copyright (C) 2016-2023 simplecpp team
  */
 
 #ifndef simplecppH
 #define simplecppH
 
 #include <cctype>
-#include <cstddef>
-#include <istream>
+#include <cstring>
+#include <iosfwd>
 #include <list>
 #include <map>
 #include <set>
@@ -40,10 +27,26 @@
 #  define SIMPLECPP_LIB
 #endif
 
+#if (__cplusplus < 201103L) && !defined(__APPLE__)
+#define nullptr NULL
+#endif
+
+#if defined(_MSC_VER)
+#  pragma warning(push)
+// suppress warnings about "conversion from 'type1' to 'type2', possible loss of data"
+#  pragma warning(disable : 4267)
+#  pragma warning(disable : 4244)
+#endif
 
 namespace simplecpp {
+    /** C code standard */
+    enum cstd_t { CUnknown=-1, C89, C99, C11, C17, C23 };
+
+    /** C++ code standard */
+    enum cppstd_t { CPPUnknown=-1, CPP03, CPP11, CPP14, CPP17, CPP20, CPP23, CPP26 };
 
     typedef std::string TokenString;
+    class Macro;
 
     /**
      * Location in source code
@@ -96,21 +99,21 @@ namespace simplecpp {
      */
     class SIMPLECPP_LIB Token {
     public:
-        Token(const TokenString &s, const Location &loc) :
-            location(loc), previous(NULL), next(NULL), string(s) {
+        Token(const TokenString &s, const Location &loc, bool wsahead = false) :
+            whitespaceahead(wsahead), location(loc), previous(nullptr), next(nullptr), string(s) {
             flags();
         }
 
         Token(const Token &tok) :
-            macro(tok.macro), location(tok.location), previous(NULL), next(NULL), string(tok.string) {
-            flags();
+            macro(tok.macro), op(tok.op), comment(tok.comment), name(tok.name), number(tok.number), whitespaceahead(tok.whitespaceahead), location(tok.location), previous(nullptr), next(nullptr), string(tok.string), mExpandedFrom(tok.mExpandedFrom) {
         }
 
         void flags() {
-            name = (std::isalpha((unsigned char)string[0]) || string[0] == '_' || string[0] == '$');
+            name = (std::isalpha(static_cast<unsigned char>(string[0])) || string[0] == '_' || string[0] == '$')
+                   && (std::memchr(string.c_str(), '\'', string.size()) == nullptr);
             comment = string.size() > 1U && string[0] == '/' && (string[1] == '/' || string[1] == '*');
-            number = std::isdigit((unsigned char)string[0]) || (string.size() > 1U && string[0] == '-' && std::isdigit((unsigned char)string[1]));
-            op = (string.size() == 1U) ? string[0] : '\0';
+            number = isNumberLike(string);
+            op = (string.size() == 1U && !name && !comment && !number) ? string[0] : '\0';
         }
 
         const TokenString& str() const {
@@ -124,12 +127,17 @@ namespace simplecpp {
         bool isOneOf(const char ops[]) const;
         bool startsWithOneOf(const char c[]) const;
         bool endsWithOneOf(const char c[]) const;
+        static bool isNumberLike(const std::string& str) {
+            return std::isdigit(static_cast<unsigned char>(str[0])) ||
+                   (str.size() > 1U && (str[0] == '-' || str[0] == '+') && std::isdigit(static_cast<unsigned char>(str[1])));
+        }
 
         TokenString macro;
         char op;
         bool comment;
         bool name;
         bool number;
+        bool whitespaceahead;
         Location location;
         Token *previous;
         Token *next;
@@ -148,10 +156,22 @@ namespace simplecpp {
             return tok;
         }
 
+        void setExpandedFrom(const Token *tok, const Macro* m) {
+            mExpandedFrom = tok->mExpandedFrom;
+            mExpandedFrom.insert(m);
+            if (tok->whitespaceahead)
+                whitespaceahead = true;
+        }
+        bool isExpandedFrom(const Macro* m) const {
+            return mExpandedFrom.find(m) != mExpandedFrom.end();
+        }
+
         void printAll() const;
         void printOut() const;
     private:
         TokenString string;
+
+        std::set<const Macro*> mExpandedFrom;
 
         // Not implemented - prevent assignment
         Token &operator=(const Token &tok);
@@ -168,8 +188,11 @@ namespace simplecpp {
             SYNTAX_ERROR,
             PORTABILITY_BACKSLASH,
             UNHANDLED_CHAR_ERROR,
-            EXPLICIT_INCLUDE_NOT_FOUND
+            EXPLICIT_INCLUDE_NOT_FOUND,
+            FILE_NOT_FOUND,
+            DUI_ERROR
         } type;
+        explicit Output(const std::vector<std::string>& files, Type type, const std::string& msg) : type(type), location(files), msg(msg) {}
         Location location;
         std::string msg;
     };
@@ -179,8 +202,17 @@ namespace simplecpp {
     /** List of tokens. */
     class SIMPLECPP_LIB TokenList {
     public:
+        class Stream;
+
         explicit TokenList(std::vector<std::string> &filenames);
-        TokenList(std::istream &istr, std::vector<std::string> &filenames, const std::string &filename=std::string(), OutputList *outputList = NULL);
+        /** generates a token list from the given std::istream parameter */
+        TokenList(std::istream &istr, std::vector<std::string> &filenames, const std::string &filename=std::string(), OutputList *outputList = nullptr);
+        /** generates a token list from the given buffer */
+        TokenList(const unsigned char* data, std::size_t size, std::vector<std::string> &filenames, const std::string &filename=std::string(), OutputList *outputList = nullptr);
+        /** generates a token list from the given buffer */
+        TokenList(const char* data, std::size_t size, std::vector<std::string> &filenames, const std::string &filename=std::string(), OutputList *outputList = nullptr);
+        /** generates a token list from the given filename parameter */
+        TokenList(const std::string &filename, std::vector<std::string> &filenames, OutputList *outputList = nullptr);
         TokenList(const TokenList &other);
 #if __cplusplus >= 201103L
         TokenList(TokenList &&other);
@@ -200,7 +232,7 @@ namespace simplecpp {
         void dump() const;
         std::string stringify() const;
 
-        void readfile(std::istream &istr, const std::string &filename=std::string(), OutputList *outputList = NULL);
+        void readfile(Stream &stream, const std::string &filename=std::string(), OutputList *outputList = nullptr);
         void constFold();
 
         void removeComments();
@@ -224,8 +256,8 @@ namespace simplecpp {
         void deleteToken(Token *tok) {
             if (!tok)
                 return;
-            Token *prev = tok->previous;
-            Token *next = tok->next;
+            Token * const prev = tok->previous;
+            Token * const next = tok->next;
             if (prev)
                 prev->next = next;
             if (next)
@@ -247,11 +279,15 @@ namespace simplecpp {
                 other.frontToken->previous = backToken;
             }
             backToken = other.backToken;
-            other.frontToken = other.backToken = NULL;
+            other.frontToken = other.backToken = nullptr;
         }
 
         /** sizeof(T) */
         std::map<std::string, std::size_t> sizeOfType;
+
+        const std::vector<std::string>& getFiles() const {
+            return files;
+        }
 
     private:
         void combineOperators();
@@ -265,10 +301,12 @@ namespace simplecpp {
         void constFoldLogicalOp(Token *tok);
         void constFoldQuestionOp(Token **tok1);
 
-        std::string readUntil(std::istream &istr, const Location &location, char start, char end, OutputList *outputList, unsigned int bom);
+        std::string readUntil(Stream &stream, const Location &location, char start, char end, OutputList *outputList);
         void lineDirective(unsigned int fileIndex, unsigned int line, Location *location);
 
-        std::string lastLine(int maxsize=100000) const;
+        std::string lastLine(int maxsize=1000) const;
+        const Token* lastLineTok(int maxsize=1000) const;
+        bool isLastLinePreprocessor(int maxsize=1000) const;
 
         unsigned int fileIndex(const std::string &filename);
 
@@ -286,19 +324,32 @@ namespace simplecpp {
         bool        macroValueKnown;
     };
 
+    /** Tracking #if/#elif expressions */
+    struct SIMPLECPP_LIB IfCond {
+        explicit IfCond(const Location& location, const std::string &E, long long result) : location(location), E(E), result(result) {}
+        Location location; // location of #if/#elif
+        std::string E; // preprocessed condition
+        long long result; // condition result
+    };
+
     /**
      * Command line preprocessor settings.
-     * On the command line these are configured by -D, -U, -I, --include
+     * On the command line these are configured by -D, -U, -I, --include, -std
      */
     struct SIMPLECPP_LIB DUI {
-        DUI() {}
+        DUI() : clearIncludeCache(false), removeComments(false) {}
         std::list<std::string> defines;
         std::set<std::string> undefined;
         std::list<std::string> includePaths;
         std::list<std::string> includes;
+        std::string std;
+        bool clearIncludeCache;
+        bool removeComments; /** remove comment tokens from included files */
     };
 
-    SIMPLECPP_LIB std::map<std::string, TokenList*> load(const TokenList &rawtokens, std::vector<std::string> &filenames, const DUI &dui, OutputList *outputList = NULL);
+    SIMPLECPP_LIB long long characterLiteralToLL(const std::string& str);
+
+    SIMPLECPP_LIB std::map<std::string, TokenList*> load(const TokenList &rawtokens, std::vector<std::string> &filenames, const DUI &dui, OutputList *outputList = nullptr);
 
     /**
      * Preprocess
@@ -310,8 +361,9 @@ namespace simplecpp {
      * @param dui defines, undefs, and include paths
      * @param outputList output: list that will receive output messages
      * @param macroUsage output: macro usage
+     * @param ifCond output: #if/#elif expressions
      */
-    SIMPLECPP_LIB void preprocess(TokenList &output, const TokenList &rawtokens, std::vector<std::string> &files, std::map<std::string, TokenList*> &filedata, const DUI &dui, OutputList *outputList = NULL, std::list<MacroUsage> *macroUsage = NULL);
+    SIMPLECPP_LIB void preprocess(TokenList &output, const TokenList &rawtokens, std::vector<std::string> &files, std::map<std::string, TokenList*> &filedata, const DUI &dui, OutputList *outputList = nullptr, std::list<MacroUsage> *macroUsage = nullptr, std::list<IfCond> *ifCond = nullptr);
 
     /**
      * Deallocate data
@@ -323,6 +375,28 @@ namespace simplecpp {
 
     /** Convert Cygwin path to Windows path */
     SIMPLECPP_LIB std::string convertCygwinToWindowsPath(const std::string &cygwinPath);
+
+    /** Returns the C version a given standard */
+    SIMPLECPP_LIB cstd_t getCStd(const std::string &std);
+
+    /** Returns the C++ version a given standard */
+    SIMPLECPP_LIB cppstd_t getCppStd(const std::string &std);
+
+    /** Returns the __STDC_VERSION__ value for a given standard */
+    SIMPLECPP_LIB std::string getCStdString(const std::string &std);
+    SIMPLECPP_LIB std::string getCStdString(cstd_t std);
+
+    /** Returns the __cplusplus value for a given standard */
+    SIMPLECPP_LIB std::string getCppStdString(const std::string &std);
+    SIMPLECPP_LIB std::string getCppStdString(cppstd_t std);
 }
+
+#if defined(_MSC_VER)
+#  pragma warning(pop)
+#endif
+
+#if (__cplusplus < 201103L) && !defined(__APPLE__)
+#undef nullptr
+#endif
 
 #endif

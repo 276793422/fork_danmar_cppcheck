@@ -23,6 +23,7 @@ def wget(filepath):
     if '/' in filepath:
         filename = filename[filename.rfind('/') + 1:]
     for d in DEBIAN:
+        # TODO: handle exitcode?
         subprocess.call(
             ['nice', 'wget', '--tries=10', '--timeout=300', '-O', filename, d + filepath])
         if os.path.isfile(filename):
@@ -40,10 +41,11 @@ def latestvername(names):
 def getpackages():
     if not wget('ls-lR.gz'):
         return []
+    # TODO: handle exitcode?
     subprocess.call(['nice', 'gunzip', 'ls-lR.gz'])
-    f = open('ls-lR', 'rt')
-    lines = f.readlines()
-    f.close()
+    with open('ls-lR', 'rt') as f:
+        lines = f.readlines()
+    # TODO: handle exitcode?
     subprocess.call(['rm', 'ls-lR'])
 
     path = None
@@ -90,6 +92,7 @@ def removeAll():
         try:
             for filename in filenames:
                 if os.path.isdir(filename):
+                    # pylint: disable=deprecated-argument - FIXME: onerror was deprecated in Python 3.12
                     shutil.rmtree(filename, onerror=handleRemoveReadonly)
                 else:
                     os.remove(filename)
@@ -141,10 +144,13 @@ def downloadpackage(filepath, outpath):
 
     filename = filepath[filepath.rfind('/') + 1:]
     if filename[-3:] == '.gz':
+        # TODO: handle exitcode?
         subprocess.call(['tar', 'xzvf', filename])
     elif filename[-3:] == '.xz':
+        # TODO: handle exitcode?
         subprocess.call(['tar', 'xJvf', filename])
     elif filename[-4:] == '.bz2':
+        # TODO: handle exitcode?
         subprocess.call(['tar', 'xjvf', filename])
     else:
         return
@@ -153,6 +159,7 @@ def downloadpackage(filepath, outpath):
 
     for g in glob.glob('[#_A-Za-z0-9]*'):
         if os.path.isdir(g):
+            # TODO: handle exitcode?
             subprocess.call(['tar', '-cJvf', outpath + filename[:filename.rfind('.')] + '.xz', g])
             break
 

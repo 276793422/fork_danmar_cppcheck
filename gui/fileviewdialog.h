@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,22 +20,25 @@
 #define FILEVIEW_DIALOG_H
 
 #include <QDialog>
+#include <QObject>
 #include <QString>
-#include "ui_file.h"
 
 class QWidget;
 class QTextEdit;
+namespace Ui {
+    class Fileview;
+}
 
 /// @addtogroup GUI
 /// @{
 
 
 /**
-* @brief File view -dialog.
-* This dialog shows text files. It is used for showing the license file and
-* the authors list.
-*
-*/
+ * @brief File view -dialog.
+ * This dialog shows text files. It is used for showing the license file and
+ * the authors list.
+ *
+ */
 class FileViewDialog : public QDialog {
     Q_OBJECT
 public:
@@ -43,18 +46,19 @@ public:
                    const QString &title,
                    QWidget *parent = nullptr);
 
+    ~FileViewDialog() override;
 
 protected:
 
     /**
-    * @brief Load text file contents to edit control.
-    *
-    * @param filename File to load.
-    * @param edit Control where to load the file contents.
-    */
+     * @brief Load text file contents to edit control.
+     *
+     * @param filename File to load.
+     * @param edit Control where to load the file contents.
+     */
     void loadTextFile(const QString &filename, QTextEdit *edit);
 
-    Ui::Fileview mUI;
+    Ui::Fileview* mUI;
 };
 /// @}
 #endif // FILEVIEW_DIALOG_H

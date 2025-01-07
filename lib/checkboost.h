@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -24,13 +24,13 @@
 
 #include "check.h"
 #include "config.h"
-#include "tokenize.h"
 
 #include <string>
 
 class ErrorLogger;
 class Settings;
 class Token;
+class Tokenizer;
 
 /// @addtogroup Checks
 /// @{
@@ -40,39 +40,28 @@ class Token;
 class CPPCHECKLIB CheckBoost : public Check {
 public:
     /** This constructor is used when registering the CheckClass */
-    CheckBoost() : Check(myName()) {
-    }
+    CheckBoost() : Check(myName()) {}
 
+private:
     /** This constructor is used when running checks. */
     CheckBoost(const Tokenizer *tokenizer, const Settings *settings, ErrorLogger *errorLogger)
-        : Check(myName(), tokenizer, settings, errorLogger) {
-    }
+        : Check(myName(), tokenizer, settings, errorLogger) {}
 
     /** @brief Run checks against the normal token list */
-    void runChecks(const Tokenizer *tokenizer, const Settings *settings, ErrorLogger *errorLogger) OVERRIDE {
-        if (!tokenizer->isCPP())
-            return;
-
-        CheckBoost checkBoost(tokenizer, settings, errorLogger);
-        checkBoost.checkBoostForeachModification();
-    }
+    void runChecks(const Tokenizer &tokenizer, ErrorLogger *errorLogger) override;
 
     /** @brief %Check for container modification while using the BOOST_FOREACH macro */
     void checkBoostForeachModification();
 
-private:
     void boostForeachError(const Token *tok);
 
-    void getErrorMessages(ErrorLogger *errorLogger, const Settings *settings) const OVERRIDE {
-        CheckBoost c(nullptr, settings, errorLogger);
-        c.boostForeachError(nullptr);
-    }
+    void getErrorMessages(ErrorLogger *errorLogger, const Settings *settings) const override;
 
     static std::string myName() {
         return "Boost usage";
     }
 
-    std::string classInfo() const OVERRIDE {
+    std::string classInfo() const override {
         return "Check for invalid usage of Boost:\n"
                "- container modification during BOOST_FOREACH\n";
     }

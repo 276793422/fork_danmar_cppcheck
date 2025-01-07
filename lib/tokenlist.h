@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,11 +22,15 @@
 //---------------------------------------------------------------------------
 
 #include "config.h"
-#include "token.h"
+#include "standards.h"
 
+#include <cstddef>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
+class Token;
+class TokenList;
 class Settings;
 
 namespace simplecpp {
@@ -36,31 +40,36 @@ namespace simplecpp {
 /// @addtogroup Core
 /// @{
 
+/**
+ * @brief This struct stores pointers to the front and back tokens of the list this token is in.
+ */
+struct TokensFrontBack {
+    explicit TokensFrontBack(const TokenList& list) : list(list) {}
+    Token *front{};
+    Token* back{};
+    const TokenList& list;
+};
+
 class CPPCHECKLIB TokenList {
 public:
+    // TODO: pass settings as reference
     explicit TokenList(const Settings* settings);
     ~TokenList();
 
-    void setSettings(const Settings *settings) {
-        mSettings = settings;
-    }
-
-    const Settings *getSettings() const {
-        return mSettings;
-    }
+    TokenList(const TokenList &) = delete;
+    TokenList &operator=(const TokenList &) = delete;
 
     /** @return the source file path. e.g. "file.cpp" */
     const std::string& getSourceFilePath() const;
 
-    /** Is the code C. Used for bailouts */
-    bool isC() const {
-        return mIsC;
-    }
+    /** @return true if the code is C */
+    bool isC() const;
 
-    /** Is the code CPP. Used for bailouts */
-    bool isCPP() const {
-        return mIsCpp;
-    }
+    /** @return true if the code is C++ */
+    bool isCPP() const;
+
+    // TODO: get rid of this
+    void setLang(Standards::Language lang, bool force = false);
 
     /**
      * Delete all tokens in given token list
@@ -68,10 +77,10 @@ public:
      */
     static void deleteTokens(Token *tok);
 
-    void addtoken(std::string str, const nonneg int lineno, const nonneg int fileno, bool split = false);
-    void addtoken(std::string str, const Token *locationTok);
+    void addtoken(const std::string& str, nonneg int lineno, nonneg int column, nonneg int fileno, bool split = false);
+    void addtoken(const std::string& str, const Token *locationTok);
 
-    void addtoken(const Token *tok, const nonneg int lineno, const nonneg int fileno);
+    void addtoken(const Token *tok, nonneg int lineno, nonneg int column, nonneg int fileno);
     void addtoken(const Token *tok, const Token *locationTok);
     void addtoken(const Token *tok);
 
@@ -85,7 +94,7 @@ public:
      * @param one_line true=>copy all tokens to the same line as dest. false=>copy all tokens to dest while keeping the 'line breaks'
      * @return new location of last token copied
      */
-    static Token *copyTokens(Token *dest, const Token *first, const Token *last, bool one_line = true);
+    RET_NONNULL static Token *copyTokens(Token *dest, const Token *first, const Token *last, bool one_line = true);
 
     /**
      * Create tokens from code.
@@ -96,20 +105,22 @@ public:
      * @param code input stream for code
      * @param file0 source file name
      */
-    bool createTokens(std::istream &code, const std::string& file0 = emptyString);
+    bool createTokens(std::istream &code, const std::string& file0);
+    bool createTokens(std::istream &code, Standards::Language lang);
 
-    void createTokens(const simplecpp::TokenList *tokenList);
+    void createTokens(simplecpp::TokenList&& tokenList);
 
     /** Deallocate list */
     void deallocateTokens();
 
     /** append file name if seen the first time; return its index in any case */
-    int appendFileIfNew(const std::string &fileName);
+    int appendFileIfNew(std::string fileName);
 
     /** get first token of list */
     const Token *front() const {
         return mTokensFrontBack.front;
     }
+    // NOLINTNEXTLINE(readability-make-member-function-const) - do not allow usage of mutable pointer from const object
     Token *front() {
         return mTokensFrontBack.front;
     }
@@ -118,6 +129,7 @@ public:
     const Token *back() const {
         return mTokensFrontBack.back;
     }
+    // NOLINTNEXTLINE(readability-make-member-function-const) - do not allow usage of mutable pointer from const object
     Token *back() {
         return mTokensFrontBack.back;
     }
@@ -148,21 +160,21 @@ public:
     std::string fileLine(const Token *tok) const;
 
     /**
-    * Calculates a 64-bit checksum of the token list used to compare
-    * multiple token lists with each other as quickly as possible.
-    */
-    unsigned long long calculateChecksum() const;
+     * Calculates a hash of the token list used to compare multiple
+     * token lists with each other as quickly as possible.
+     */
+    std::size_t calculateHash() const;
 
     /**
      * Create abstract syntax tree.
      */
-    void createAst();
+    void createAst() const;
 
     /**
      * Check abstract syntax tree.
      * Throws InternalError on failure
      */
-    void validateAst() const;
+    void validateAst(bool print) const;
 
     /**
      * Verify that the given token is an element of the tokenlist.
@@ -190,12 +202,9 @@ public:
     bool isKeyword(const std::string &str) const;
 
 private:
+    void determineCppC();
 
-    /** Disable copy constructor, no implementation */
-    TokenList(const TokenList &);
-
-    /** Disable assignment operator, no implementation */
-    TokenList &operator=(const TokenList &);
+    bool createTokensInternal(std::istream &code, const std::string& file0);
 
     /** Token list */
     TokensFrontBack mTokensFrontBack;
@@ -207,16 +216,16 @@ private:
     std::vector<std::string> mOrigFiles;
 
     /** settings */
-    const Settings* mSettings;
-
-    std::set<std::string> mKeywords;
+    const Settings* const mSettings{};
 
     /** File is known to be C/C++ code */
-    bool mIsC;
-    bool mIsCpp;
+    Standards::Language mLang{Standards::Language::None};
 };
 
 /// @}
+
+const Token* isLambdaCaptureList(const Token* tok);
+const Token* findLambdaEndTokenWithoutAST(const Token* tok);
 
 //---------------------------------------------------------------------------
 #endif // tokenlistH

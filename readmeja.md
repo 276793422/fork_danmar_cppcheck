@@ -12,23 +12,22 @@
 
 ## マニュアル
 
-マニュアルは[オンライン上に](http://cppcheck.sourceforge.net/manual.pdf)あります。
+マニュアルは[オンライン上に](https://cppcheck.sourceforge.io/manual.pdf)あります。
 
 ## ビルド
 
-C++11に対応したコンパイラが利用できます。部分的にC++11にサポートしたコンパイラも利用できるかもしれません。もし、あなたのコンパイラがVisual Studio 2013や GCC 4.6で利用できるC++11機能がサポートされているなら、そのコンパイラが利用できます。
+C++11に対応したコンパイラが利用できます。部分的にC++11にサポートしたコンパイラも利用できるかもしれません。もし、あなたのコンパイラがVisual Studio 2013や GCC 4.8で利用できるC++11機能がサポートされているなら、そのコンパイラが利用できます。
 
 GUIも利用する場合、Qtライブラリが必要です。
 
 コマンドラインツールをビルドする場合、[PCRE](http://www.pcre.org/)はオプションです。これはルールを作成するために利用します。
 
 コンパイル上の選択肢がいくつかあります。
-* qmake - クロスプラットフォームのビルドツール
 * cmake - クロスプラットフォームのビルドツール
 * Windows: Visual Studio (VS 2013 またはそれ以上)
 * Windows: Qt Creator + mingw
 * gnu make
-* g++ 4.6 (またはそれ以上)
+* g++ 4.8 (またはそれ以上)
 * clang++
 
 ### cmake
@@ -50,16 +49,6 @@ CppcheckのGUIが必要な場合次のフラグを指定します。
 
 pcreが必要になりますが、正規表現のルールサポートが必要な場合次のフラグを指定します。
 -DHAVE_RULES=ON
-
-### qmake
-
-GUIをビルドするには、gui/gui.proファイルが利用できます。
-
-```shell
-cd gui
-qmake
-make
-```
 
 ### Visual Studio
 
@@ -105,19 +94,19 @@ cppcheckの設定ファイル(addon や cfg や platform)を置くディレク�
 依存関係なく Cppcheckをビルドしたい場合、次のコマンドを利用できます。
 
 ```shell
-g++ -o cppcheck -std=c++11 -Iexternals -Iexternals/simplecpp -Iexternals/tinyxml -Ilib cli/*.cpp lib/*.cpp externals/simplecpp/simplecpp.cpp externals/tinyxml/*.cpp
+g++ -o cppcheck -std=c++11 -Iexternals -Iexternals/simplecpp -Iexternals/tinyxml2 -Ilib cli/*.cpp lib/*.cpp externals/simplecpp/simplecpp.cpp externals/tinyxml2/*.cpp
 ```
 
 `--rule` や `--rule-file` を利用する場合、依存ライブラリが必要です。
 
 ```shell
-g++ -o cppcheck -std=c++11 -lpcre -DHAVE_RULES -Iexternals -Iexternals/simplecpp -Iexternals/tinyxml -Ilib cli/*.cpp lib/*.cpp externals/simplecpp/simplecpp.cpp externals/tinyxml/*.cpp
+g++ -o cppcheck -std=c++11 -lpcre -DHAVE_RULES -Iexternals -Iexternals/simplecpp -Iexternals/tinyxml2 -Ilib cli/*.cpp lib/*.cpp externals/simplecpp/simplecpp.cpp externals/tinyxml2/*.cpp
 ```
 
 ### MinGW
 
 ```shell
-mingw32-make LDFLAGS=-lshlwapi
+mingw32-make
 ```
 
 ### その他のコンパイラ/IDE
@@ -137,4 +126,4 @@ mv cppcheck cppcheck.exe
 
 ## Webページ
 
-http://cppcheck.sourceforge.net/
+https://cppcheck.sourceforge.io/

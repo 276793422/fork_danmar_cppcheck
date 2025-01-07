@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,30 +19,53 @@
 #ifndef PROJECT_FILE_H
 #define PROJECT_FILE_H
 
+#include "settings.h"
+#include "suppressions.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <map>
+#include <utility>
+
+#include <QList>
 #include <QObject>
 #include <QString>
 #include <QStringList>
-#include <QXmlStreamReader>
 
-#include "suppressions.h"
-
-#include <settings.h>
+class QXmlStreamReader;
+class QXmlStreamWriter;
 
 /// @addtogroup GUI
 /// @{
 
 
 /**
-* @brief A class that reads and writes project files.
-* The project files contain project-specific settings for checking. For
-* example a list of include paths.
-*/
+ * @brief A class that reads and writes project files.
+ * The project files contain project-specific settings for checking. For
+ * example a list of include paths.
+ */
 class ProjectFile : public QObject {
     Q_OBJECT
 
 public:
     explicit ProjectFile(QObject *parent = nullptr);
-    explicit ProjectFile(const QString &filename, QObject *parent = nullptr);
+    explicit ProjectFile(QString filename, QObject *parent = nullptr);
+    ~ProjectFile() override {
+        if (this == mActiveProject) mActiveProject = nullptr;
+    }
+
+    enum class CheckLevel : std::uint8_t {
+        reduced,
+        normal,
+        exhaustive
+    };
+
+    static ProjectFile* getActiveProject() {
+        return mActiveProject;
+    }
+    void setActiveProject() {
+        mActiveProject = this;
+    }
 
     /**
      * @brief Read the project file.
@@ -54,15 +77,15 @@ public:
      * @brief Get project root path.
      * @return project root path.
      */
-    QString getRootPath() const {
+    const QString& getRootPath() const {
         return mRootPath;
     }
 
-    QString getBuildDir() const {
+    const QString& getBuildDir() const {
         return mBuildDir;
     }
 
-    QString getImportProject() const {
+    const QString& getImportProject() const {
         return mImportProject;
     }
 
@@ -86,93 +109,123 @@ public:
         mCheckUnusedTemplates = b;
     }
 
+    bool getInlineSuppression() const {
+        return mInlineSuppression;
+    }
+
+    void setInlineSuppression(bool b) {
+        mInlineSuppression = b;
+    }
+
     /**
-    * @brief Get list of include directories.
-    * @return list of directories.
-    */
+     * @brief Get list of include directories.
+     * @return list of directories.
+     */
     QStringList getIncludeDirs() const {
         return ProjectFile::fromNativeSeparators(mIncludeDirs);
     }
 
     /**
-    * @brief Get list of defines.
-    * @return list of defines.
-    */
-    QStringList getDefines() const {
+     * @brief Get list of defines.
+     * @return list of defines.
+     */
+    const QStringList& getDefines() const {
         return mDefines;
     }
 
     /**
-    * @brief Get list of undefines.
-    * @return list of undefines.
-    */
-    QStringList getUndefines() const {
+     * @brief Get list of undefines.
+     * @return list of undefines.
+     */
+    const QStringList& getUndefines() const {
         return mUndefines;
     }
 
     /**
-    * @brief Get list of paths to check.
-    * @return list of paths.
-    */
+     * @brief Get list of paths to check.
+     * @return list of paths.
+     */
     QStringList getCheckPaths() const {
         return ProjectFile::fromNativeSeparators(mPaths);
     }
 
     /**
-    * @brief Get list of paths to exclude from the check.
-    * @return list of paths.
-    */
+     * @brief Get list of paths to exclude from the check.
+     * @return list of paths.
+     */
     QStringList getExcludedPaths() const {
         return ProjectFile::fromNativeSeparators(mExcludedPaths);
     }
 
     /**
-    * @brief Get list of paths to exclude from the check.
-    * @return list of paths.
-    */
-    QStringList getVsConfigurations() const {
+     * @brief Get list of paths to exclude from the check.
+     * @return list of paths.
+     */
+    const QStringList& getVsConfigurations() const {
         return mVsConfigurations;
     }
 
     /**
-    * @brief Get list libraries.
-    * @return list of libraries.
-    */
-    QStringList getLibraries() const {
+     * @brief Get list libraries.
+     * @return list of libraries.
+     */
+    const QStringList& getLibraries() const {
         return mLibraries;
     }
 
     /**
      * @brief Get platform.
-     * @return Current platform. If it ends with .xml then it is a file. Otherwise it must match one of the return values from @sa cppcheck::Platform::platformString() ("win32A", "unix32", ..)
+     * @return Current platform. If it ends with .xml then it is a file. Otherwise it must match one of the return values from @sa cppcheck::Platform::toString() ("win32A", "unix32", ..)
      */
-    QString getPlatform() const {
+    const QString& getPlatform() const {
         return mPlatform;
     }
 
+    const QString& getProjectName() const {
+        return mProjectName;
+    }
+
+    void setProjectName(QString projectName) {
+        mProjectName = std::move(projectName);
+    }
+
     /**
-    * @brief Get "raw" suppressions.
-    * @return list of suppressions.
-    */
-    QList<Suppressions::Suppression> getSuppressions() const {
+     * @brief Get "raw" suppressions.
+     * @return list of suppressions.
+     */
+    const QList<SuppressionList::Suppression>& getSuppressions() const {
         return mSuppressions;
     }
 
     /**
-    * @brief Get list addons.
-    * @return list of addons.
-    */
-    QStringList getAddons() const {
+     * @brief Get "checking" suppressions. Relative paths are converted to absolute paths.
+     * @return list of suppressions.
+     */
+    QList<SuppressionList::Suppression> getCheckingSuppressions() const;
+
+    /**
+     * @brief Get list addons.
+     * @return list of addons.
+     */
+    const QStringList& getAddons() const {
         return mAddons;
     }
 
     /**
-    * @brief Get list of addons and tools.
-    * @return list of addons and tools.
-    */
+     * @brief Get path to addon python script
+     * @param filesDir Data files folder set by --data-dir
+     * @param addon addon i.e. "misra" to lookup
+     */
+    static QString getAddonFilePath(QString filesDir, const QString &addon);
+
+    /**
+     * @brief Get list of addons and tools.
+     * @return list of addons and tools.
+     */
     QStringList getAddonsAndTools() const;
 
     bool getClangAnalyzer() const {
+        // TODO
         return false; //mClangAnalyzer;
     }
 
@@ -188,7 +241,7 @@ public:
         mClangTidy = c;
     }
 
-    QStringList getTags() const {
+    const QStringList& getTags() const {
         return mTags;
     }
 
@@ -200,18 +253,26 @@ public:
         mMaxCtuDepth = maxCtuDepth;
     }
 
+    int getMaxTemplateRecursion() const {
+        return mMaxTemplateRecursion;
+    }
+
+    void setMaxTemplateRecursion(int maxTemplateRecursion) {
+        mMaxTemplateRecursion = maxTemplateRecursion;
+    }
+
     /**
-    * @brief Get filename for the project file.
-    * @return file name.
-    */
-    QString getFilename() const {
+     * @brief Get filename for the project file.
+     * @return file name.
+     */
+    const QString& getFilename() const {
         return mFilename;
     }
 
     /**
-    * @brief Set project root path.
-    * @param rootpath new project root path.
-    */
+     * @brief Set project root path.
+     * @param rootpath new project root path.
+     */
     void setRootPath(const QString &rootpath) {
         mRootPath = rootpath;
     }
@@ -274,7 +335,10 @@ public:
      * @brief Set list of suppressions.
      * @param suppressions List of suppressions.
      */
-    void setSuppressions(const QList<Suppressions::Suppression> &suppressions);
+    void setSuppressions(const QList<SuppressionList::Suppression> &suppressions);
+
+    /** Add suppression */
+    void addSuppression(const SuppressionList::Suppression &suppression);
 
     /**
      * @brief Set list of addons.
@@ -287,12 +351,61 @@ public:
      */
     void setVSConfigurations(const QStringList &vsConfigs);
 
+    /** CheckLevel: normal/exhaustive */
+    void setCheckLevel(CheckLevel checkLevel);
+    CheckLevel getCheckLevel() const {
+        return mCheckLevel;
+    }
+
     /**
      * @brief Set tags.
      * @param tags tag list
      */
     void setTags(const QStringList &tags) {
         mTags = tags;
+    }
+
+    /** Set tags for a warning */
+    void setWarningTags(std::size_t hash, const QString& tags);
+
+    /** Get tags for a warning */
+    QString getWarningTags(std::size_t hash) const;
+
+    /** Bughunting (Cppcheck Premium) */
+    void setBughunting(bool bughunting) {
+        mBughunting = bughunting;
+    }
+    bool getBughunting() const {
+        return mBughunting;
+    }
+
+    /** @brief Get list of coding standards (checked by Cppcheck Premium). */
+    const QStringList& getCodingStandards() const {
+        return mCodingStandards;
+    }
+
+    /**
+     * @brief Set list of coding standards (checked by Cppcheck Premium).
+     * @param codingStandards List of coding standards.
+     */
+    void setCodingStandards(QStringList codingStandards) {
+        mCodingStandards = std::move(codingStandards);
+    }
+
+    /** Cert C: int precision */
+    void setCertIntPrecision(int p) {
+        mCertIntPrecision = p;
+    }
+    int getCertIntPrecision() const {
+        return mCertIntPrecision;
+    }
+
+    /** Cppcheck Premium: License file */
+    void setLicenseFile(const QString& licenseFile) {
+        mPremiumLicenseFile = licenseFile;
+    }
+    const QString& getLicenseFile() const {
+        return mPremiumLicenseFile;
     }
 
     /**
@@ -321,25 +434,25 @@ public:
     SafeChecks safeChecks;
 
     /** Check unknown function return values */
-    QStringList getCheckUnknownFunctionReturn() const {
+    const QStringList& getCheckUnknownFunctionReturn() const {
         return mCheckUnknownFunctionReturn;
     }
-    void setCheckUnknownFunctionReturn(const QStringList &s) {
+    /*
+       void setCheckUnknownFunctionReturn(const QStringList &s) {
         mCheckUnknownFunctionReturn = s;
-    }
+       }
+     */
 
     /** Use Clang parser */
     bool clangParser;
 
-    /** Bug hunting */
-    bool bugHunting;
 protected:
 
     /**
      * @brief Read optional root path from XML.
      * @param reader XML stream reader.
      */
-    void readRootPath(QXmlStreamReader &reader);
+    void readRootPath(const QXmlStreamReader &reader);
 
     void readBuildDir(QXmlStreamReader &reader);
 
@@ -349,9 +462,11 @@ protected:
      */
     void readImportProject(QXmlStreamReader &reader);
 
-    bool readBool(QXmlStreamReader &reader);
+    static bool readBool(QXmlStreamReader &reader);
 
-    int readInt(QXmlStreamReader &reader, int defaultValue);
+    static int readInt(QXmlStreamReader &reader, int defaultValue);
+
+    static QString readString(QXmlStreamReader &reader);
 
     /**
      * @brief Read list of include directories from XML.
@@ -396,12 +511,18 @@ protected:
     void readSuppressions(QXmlStreamReader &reader);
 
     /**
-      * @brief Read string list
-      * @param stringlist   destination string list
-      * @param reader       XML stream reader
-      * @param elementname  elementname for each string
-      */
-    void readStringList(QStringList &stringlist, QXmlStreamReader &reader, const char elementname[]);
+     * @brief Read tag warnings, what warnings are tagged with a specific tag
+     * @param reader XML stream reader.
+     */
+    void readTagWarnings(QXmlStreamReader &reader, const QString &tag);
+
+    /**
+     * @brief Read string list
+     * @param stringlist   destination string list
+     * @param reader       XML stream reader
+     * @param elementname  elementname for each string
+     */
+    static void readStringList(QStringList &stringlist, QXmlStreamReader &reader, const char elementname[]);
 
     /**
      * @brief Write string list
@@ -457,6 +578,11 @@ private:
     bool mCheckUnusedTemplates;
 
     /**
+     * @brief Enable inline suppression.
+     */
+    bool mInlineSuppression;
+
+    /**
      * @brief List of include directories used to search include files.
      */
     QStringList mIncludeDirs;
@@ -494,12 +620,31 @@ private:
     /**
      * @brief List of suppressions.
      */
-    QList<Suppressions::Suppression> mSuppressions;
+    QList<SuppressionList::Suppression> mSuppressions;
 
     /**
      * @brief List of addons.
      */
     QStringList mAddons;
+
+    bool mBughunting = false;
+
+    /** @brief Should Cppcheck run normal or exhaustive analysis? */
+    CheckLevel mCheckLevel = CheckLevel::normal;
+
+    /**
+     * @brief List of coding standards, checked by Cppcheck Premium.
+     */
+    QStringList mCodingStandards;
+
+    /** @brief Cppcheck Premium: license file */
+    QString mPremiumLicenseFile;
+
+    /** @brief Project name, used when generating compliance report */
+    QString mProjectName;
+
+    /** @brief Cppcheck Premium: This value is passed to the Cert C checker if that is enabled */
+    int mCertIntPrecision;
 
     /** @brief Execute clang analyzer? */
     bool mClangAnalyzer;
@@ -508,15 +653,24 @@ private:
     bool mClangTidy;
 
     /**
-     * @brief Warning tags
+     * @brief Tags
      */
     QStringList mTags;
+
+    /**
+     * @brief Warning tags
+     */
+    std::map<std::size_t, QString> mWarningTags;
 
     /** Max CTU depth */
     int mMaxCtuDepth;
 
+    /** Max template instantiation recursion */
+    int mMaxTemplateRecursion;
+
     QStringList mCheckUnknownFunctionReturn;
 
+    static ProjectFile *mActiveProject;
 };
 /// @}
 #endif  // PROJECT_FILE_H

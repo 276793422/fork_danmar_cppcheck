@@ -1,6 +1,6 @@
 /*
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2018 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,11 +18,12 @@
 
 #include "checkboost.h"
 
-#include "errorlogger.h"
+#include "errortypes.h"
 #include "symboldatabase.h"
 #include "token.h"
+#include "tokenize.h"
 
-#include <cstddef>
+#include <vector>
 
 // Register this check class (by creating a static instance of it)
 namespace {
@@ -33,13 +34,14 @@ static const CWE CWE664(664);
 
 void CheckBoost::checkBoostForeachModification()
 {
+    logChecker("CheckBoost::checkBoostForeachModification");
     const SymbolDatabase *symbolDatabase = mTokenizer->getSymbolDatabase();
     for (const Scope * scope : symbolDatabase->functionScopes) {
         for (const Token *tok = scope->bodyStart->next(); tok && tok != scope->bodyEnd; tok = tok->next()) {
             if (!Token::simpleMatch(tok, "BOOST_FOREACH ("))
                 continue;
 
-            const Token *containerTok = tok->next()->link()->previous();
+            const Token *containerTok = tok->linkAt(1)->previous();
             if (!Token::Match(containerTok, "%var% ) {"))
                 continue;
 
@@ -60,6 +62,21 @@ void CheckBoost::checkBoostForeachModification()
 void CheckBoost::boostForeachError(const Token *tok)
 {
     reportError(tok, Severity::error, "boostForeachError",
-                "BOOST_FOREACH caches the end() iterator. It's undefined behavior if you modify the container inside.", CWE664, false
-               );
+                "BOOST_FOREACH caches the end() iterator. It's undefined behavior if you modify the container inside.", CWE664, Certainty::normal
+                );
+}
+
+void CheckBoost::runChecks(const Tokenizer &tokenizer, ErrorLogger *errorLogger)
+{
+    if (!tokenizer.isCPP())
+        return;
+
+    CheckBoost checkBoost(&tokenizer, &tokenizer.getSettings(), errorLogger);
+    checkBoost.checkBoostForeachModification();
+}
+
+void CheckBoost::getErrorMessages(ErrorLogger *errorLogger, const Settings *settings) const
+{
+    CheckBoost c(nullptr, settings, errorLogger);
+    c.boostForeachError(nullptr);
 }

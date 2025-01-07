@@ -1,6 +1,6 @@
 /*
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2019 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,17 +16,26 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <QObject>
-#include <QString>
-#include <QList>
-#include <QDir>
-#include <QXmlStreamWriter>
-#include <QDebug>
-#include "report.h"
-#include "erroritem.h"
-#include "xmlreport.h"
 #include "xmlreportv2.h"
+
 #include "cppcheck.h"
+#include "erroritem.h"
+#include "report.h"
+#include "settings.h"
+#include "xmlreport.h"
+
+#include <utility>
+
+#include <QDebug>
+#include <QDir>
+#include <QFile>
+#include <QXmlStreamAttributes>
+#include <QXmlStreamReader>
+#include <QXmlStreamWriter>
+
+#if (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
+#include <QStringRef>
+#endif
 
 static const QString ResultElementName = "results";
 static const QString CppcheckElementName = "cppcheck";
@@ -34,11 +43,13 @@ static const QString ErrorElementName = "error";
 static const QString ErrorsElementName = "errors";
 static const QString LocationElementName = "location";
 static const QString CWEAttribute = "cwe";
+static const QString HashAttribute = "hash";
 static const QString SinceDateAttribute = "sinceDate";
 static const QString TagsAttribute = "tag";
 static const QString FilenameAttribute = "file";
 static const QString IncludedFromFilenameAttribute = "file0";
 static const QString InconclusiveAttribute = "inconclusive";
+static const QString RemarkAttribute = "remark";
 static const QString InfoAttribute = "info";
 static const QString LineAttribute = "line";
 static const QString ColumnAttribute = "column";
@@ -46,14 +57,15 @@ static const QString IdAttribute = "id";
 static const QString SeverityAttribute = "severity";
 static const QString MsgAttribute = "msg";
 static const QString VersionAttribute = "version";
+static const QString ProductNameAttribute = "product-name";
 static const QString VerboseAttribute = "verbose";
 
-XmlReportV2::XmlReportV2(const QString &filename) :
+XmlReportV2::XmlReportV2(const QString &filename, QString productName) :
     XmlReport(filename),
+    mProductName(std::move(productName)),
     mXmlReader(nullptr),
     mXmlWriter(nullptr)
-{
-}
+{}
 
 XmlReportV2::~XmlReportV2()
 {
@@ -81,12 +93,18 @@ bool XmlReportV2::open()
 
 void XmlReportV2::writeHeader()
 {
+    const auto nameAndVersion = Settings::getNameAndVersion(mProductName.toStdString());
+    const QString name = QString::fromStdString(nameAndVersion.first);
+    const QString version = nameAndVersion.first.empty() ? CppCheck::version() : QString::fromStdString(nameAndVersion.second);
+
     mXmlWriter->setAutoFormatting(true);
     mXmlWriter->writeStartDocument();
     mXmlWriter->writeStartElement(ResultElementName);
     mXmlWriter->writeAttribute(VersionAttribute, QString::number(2));
     mXmlWriter->writeStartElement(CppcheckElementName);
-    mXmlWriter->writeAttribute(VersionAttribute, QString(CppCheck::version()));
+    if (!name.isEmpty())
+        mXmlWriter->writeAttribute(ProductNameAttribute, name);
+    mXmlWriter->writeAttribute(VersionAttribute, version);
     mXmlWriter->writeEndElement();
     mXmlWriter->writeStartElement(ErrorsElementName);
 }
@@ -101,13 +119,13 @@ void XmlReportV2::writeFooter()
 void XmlReportV2::writeError(const ErrorItem &error)
 {
     /*
-    Error example from the core program in xml
-    <error id="mismatchAllocDealloc" severity="error" msg="Mismatching allocation and deallocation: k"
+       Error example from the core program in xml
+       <error id="mismatchAllocDealloc" severity="error" msg="Mismatching allocation and deallocation: k"
               verbose="Mismatching allocation and deallocation: k">
-      <location file="..\..\test\test.cxx" line="16"/>
-      <location file="..\..\test\test.cxx" line="32"/>
-    </error>
-    */
+       <location file="..\..\test\test.cxx" line="16"/>
+       <location file="..\..\test\test.cxx" line="32"/>
+       </error>
+     */
 
     mXmlWriter->writeStartElement(ErrorElementName);
     mXmlWriter->writeAttribute(IdAttribute, error.errorId);
@@ -120,8 +138,14 @@ void XmlReportV2::writeError(const ErrorItem &error)
     mXmlWriter->writeAttribute(VerboseAttribute, message);
     if (error.inconclusive)
         mXmlWriter->writeAttribute(InconclusiveAttribute, "true");
+    if (!error.remark.isEmpty())
+        mXmlWriter->writeAttribute(RemarkAttribute, error.remark);
     if (error.cwe > 0)
         mXmlWriter->writeAttribute(CWEAttribute, QString::number(error.cwe));
+    if (error.hash > 0)
+        mXmlWriter->writeAttribute(HashAttribute, QString::number(error.hash));
+    if (!error.file0.isEmpty())
+        mXmlWriter->writeAttribute(IncludedFromFilenameAttribute, quoteMessage(error.file0));
     if (!error.sinceDate.isEmpty())
         mXmlWriter->writeAttribute(SinceDateAttribute, error.sinceDate);
     if (!error.tags.isEmpty())
@@ -131,9 +155,6 @@ void XmlReportV2::writeError(const ErrorItem &error)
         mXmlWriter->writeStartElement(LocationElementName);
 
         QString file = QDir::toNativeSeparators(error.errorPath[i].file);
-        if (!error.file0.isEmpty() && file != error.file0) {
-            mXmlWriter->writeAttribute(IncludedFromFilenameAttribute, quoteMessage(error.file0));
-        }
         mXmlWriter->writeAttribute(FilenameAttribute, XmlReport::quoteMessage(file));
         mXmlWriter->writeAttribute(LineAttribute, QString::number(error.errorPath[i].line));
         if (error.errorPath[i].column > 0)
@@ -189,16 +210,16 @@ QList<ErrorItem> XmlReportV2::read()
     return errors;
 }
 
-ErrorItem XmlReportV2::readError(QXmlStreamReader *reader)
+ErrorItem XmlReportV2::readError(const QXmlStreamReader *reader)
 {
     /*
-    Error example from the core program in xml
-    <error id="mismatchAllocDealloc" severity="error" msg="Mismatching allocation and deallocation: k"
+       Error example from the core program in xml
+       <error id="mismatchAllocDealloc" severity="error" msg="Mismatching allocation and deallocation: k"
               verbose="Mismatching allocation and deallocation: k">
-      <location file="..\..\test\test.cxx" line="16"/>
-      <location file="..\..\test\test.cxx" line="32"/>
-    </error>
-    */
+       <location file="..\..\test\test.cxx" line="16"/>
+       <location file="..\..\test\test.cxx" line="32"/>
+       </error>
+     */
 
     ErrorItem item;
 
@@ -213,8 +234,14 @@ ErrorItem XmlReportV2::readError(QXmlStreamReader *reader)
         item.message = XmlReport::unquoteMessage(message);
         if (attribs.hasAttribute(QString(), InconclusiveAttribute))
             item.inconclusive = true;
+        if (attribs.hasAttribute(QString(), RemarkAttribute))
+            item.remark = attribs.value(QString(), RemarkAttribute).toString();
         if (attribs.hasAttribute(QString(), CWEAttribute))
-            item.cwe = attribs.value(QString(), CWEAttribute).toString().toInt();
+            item.cwe = attribs.value(QString(), CWEAttribute).toInt();
+        if (attribs.hasAttribute(QString(), HashAttribute))
+            item.hash = attribs.value(QString(), HashAttribute).toULongLong();
+        if (attribs.hasAttribute(QString(), IncludedFromFilenameAttribute))
+            item.file0 = attribs.value(QString(), IncludedFromFilenameAttribute).toString();
         if (attribs.hasAttribute(QString(), SinceDateAttribute))
             item.sinceDate = attribs.value(QString(), SinceDateAttribute).toString();
         if (attribs.hasAttribute(QString(), TagsAttribute))

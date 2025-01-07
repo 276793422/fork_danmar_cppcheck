@@ -1,6 +1,6 @@
 /*
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2018 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,23 +16,29 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <QApplication>
-#include <QCoreApplication>
-#include <QTextCodec>
-#include <QMetaType>
-#include <QStringList>
-#include <QSettings>
+#include "cppcheck.h"
+#include "common.h"
+#include "mainwindow.h"
+#include "erroritem.h" // IWYU pragma: keep
+#include "translationhandler.h"
+
 #ifdef _WIN32
+#include "aboutdialog.h"
+
 #include <QMessageBox>
 #else
 #include <iostream>
 #endif
-#include "cppcheck.h"
-#include "common.h"
-#include "mainwindow.h"
-#include "erroritem.h"
-#include "aboutdialog.h"
-#include "translationhandler.h"
+#include <algorithm>
+#include <string>
+
+#include <QApplication>
+#include <QCoreApplication>
+#include <QIcon>
+#include <QSettings>
+#include <QString>
+#include <QStringList>
+#include <QVariant>
 
 
 static void ShowUsage();
@@ -42,48 +48,42 @@ static bool CheckArgs(const QStringList &args);
 int main(int argc, char *argv[])
 {
 
-#if (QT_VERSION >= QT_VERSION_CHECK(5, 6, 0))
+#if (QT_VERSION >= QT_VERSION_CHECK(5, 6, 0)) && (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
 #endif
 
     QApplication app(argc, argv);
 
-#if QT_VERSION < 0x050000
-    // Set codecs so that UTF-8 strings in sources are handled correctly.
-    // This is ONLY needed for Qt versions 4.x.
-    // Qt 5.x assumes UTF-8 by default.
-    QTextCodec::setCodecForTr(QTextCodec::codecForName("UTF-8"));
-    QTextCodec::setCodecForCStrings(QTextCodec::codecForName("UTF-8"));
-#endif
-
     QCoreApplication::setOrganizationName("Cppcheck");
     QCoreApplication::setApplicationName("Cppcheck-GUI");
 
-    QSettings* settings = new QSettings("Cppcheck", "Cppcheck-GUI", &app);
+    auto* settings = new QSettings("Cppcheck", "Cppcheck-GUI", &app);
 
     // Set data dir..
-    foreach (const QString arg, app.arguments()) {
-        if (arg.startsWith("--data-dir=")) {
-            settings->setValue("DATADIR", arg.mid(11));
-            return 0;
-        }
+    const QStringList args = QApplication::arguments();
+    auto it = std::find_if(args.cbegin(), args.cend(), [](const QString& arg) {
+        return arg.startsWith("--data-dir=");
+    });
+    if (it != args.end()) {
+        settings->setValue("DATADIR", it->mid(11));
+        return 0;
     }
 
-    TranslationHandler* th = new TranslationHandler(&app);
+    auto* th = new TranslationHandler(&app);
     th->setLanguage(settings->value(SETTINGS_LANGUAGE, th->suggestLanguage()).toString());
 
-    if (!CheckArgs(app.arguments()))
+    if (!CheckArgs(QApplication::arguments()))
         return 0;
 
-    app.setWindowIcon(QIcon(":cppcheck-gui.png"));
+    QApplication::setWindowIcon(QIcon(":cppcheck-gui.png"));
 
     // Register this metatype that is used to transfer error info
     qRegisterMetaType<ErrorItem>("ErrorItem");
 
     MainWindow window(th, settings);
     window.show();
-    return app.exec();
+    return QApplication::exec();
 }
 
 // Check only arguments needing action before GUI is shown.
@@ -104,24 +104,24 @@ static bool CheckArgs(const QStringList &args)
 static void ShowUsage()
 {
     QString helpMessage = MainWindow::tr(
-                              "Cppcheck GUI.\n\n"
-                              "Syntax:\n"
-                              "    cppcheck-gui [OPTIONS] [files or paths]\n\n"
-                              "Options:\n"
-                              "    -h, --help              Print this help\n"
-                              "    -p <file>               Open given project file and start checking it\n"
-                              "    -l <file>               Open given results xml file\n"
-                              "    -d <directory>          Specify the directory that was checked to generate the results xml specified with -l\n"
-                              "    -v, --version           Show program version\n"
-                              "    --data-dir=<directory>  This option is for installation scripts so they can configure the directory where\n"
-                              "                            datafiles are located (translations, cfg). The GUI is not started when this option\n"
-                              "                            is used.");
+        "Cppcheck GUI.\n\n"
+        "Syntax:\n"
+        "    cppcheck-gui [OPTIONS] [files or paths]\n\n"
+        "Options:\n"
+        "    -h, --help              Print this help\n"
+        "    -p <file>               Open given project file and start checking it\n"
+        "    -l <file>               Open given results xml file\n"
+        "    -d <directory>          Specify the directory that was checked to generate the results xml specified with -l\n"
+        "    -v, --version           Show program version\n"
+        "    --data-dir=<directory>  This option is for installation scripts so they can configure the directory where\n"
+        "                            datafiles are located (translations, cfg). The GUI is not started when this option\n"
+        "                            is used.");
 #if defined(_WIN32)
     QMessageBox msgBox(QMessageBox::Information,
                        MainWindow::tr("Cppcheck GUI - Command line parameters"),
                        helpMessage,
                        QMessageBox::Ok
-                      );
+                       );
     (void)msgBox.exec();
 #else
     std::cout << helpMessage.toStdString() << std::endl;

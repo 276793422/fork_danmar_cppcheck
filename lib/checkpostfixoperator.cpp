@@ -1,6 +1,6 @@
 /*
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2018 Cppcheck team.
+ * Copyright (C) 2007-2023 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,12 +23,13 @@
 
 #include "checkpostfixoperator.h"
 
-#include "errorlogger.h"
+#include "errortypes.h"
 #include "settings.h"
 #include "symboldatabase.h"
 #include "token.h"
+#include "tokenize.h"
 
-#include <cstddef>
+#include <vector>
 
 //---------------------------------------------------------------------------
 
@@ -40,13 +41,15 @@ namespace {
 
 
 // CWE ids used
-static const struct CWE CWE398(398U);   // Indicator of Poor Code Quality
+static const CWE CWE398(398U);   // Indicator of Poor Code Quality
 
 
 void CheckPostfixOperator::postfixOperator()
 {
-    if (!mSettings->isEnabled(Settings::PERFORMANCE))
+    if (!mSettings->severity.isEnabled(Severity::performance))
         return;
+
+    logChecker("CheckPostfixOperator::postfixOperator"); // performance
 
     const SymbolDatabase *symbolDatabase = mTokenizer->getSymbolDatabase();
 
@@ -83,5 +86,20 @@ void CheckPostfixOperator::postfixOperatorError(const Token *tok)
                 "Pre-increment/decrement can be more efficient than "
                 "post-increment/decrement. Post-increment/decrement usually "
                 "involves keeping a copy of the previous value around and "
-                "adds a little extra code.", CWE398, false);
+                "adds a little extra code.", CWE398, Certainty::normal);
+}
+
+void CheckPostfixOperator::runChecks(const Tokenizer &tokenizer, ErrorLogger *errorLogger)
+{
+    if (tokenizer.isC())
+        return;
+
+    CheckPostfixOperator checkPostfixOperator(&tokenizer, &tokenizer.getSettings(), errorLogger);
+    checkPostfixOperator.postfixOperator();
+}
+
+void CheckPostfixOperator::getErrorMessages(ErrorLogger *errorLogger, const Settings *settings) const
+{
+    CheckPostfixOperator c(nullptr, settings, errorLogger);
+    c.postfixOperatorError(nullptr);
 }

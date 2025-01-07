@@ -1,19 +1,5 @@
 ## Cppcheck developer and build tools
 
-### * tools/astyle-client.py
-
-With this tool you can astyle-format arbitrary cpp/header files even if you do not have astyle on your computer.
-
-astyle on a server is used.
-
-Example usage:
-
-    python tools/astyle-client.py lib/token.cpp
-
-The file is reformatted and a status message is written that says if there were any changes or not.
-
-This script is a lot slower than running astyle locally on your computer.
-
 ### * tools/matchcompiler.py
 
 The matchcompiler.py is a build script that performs a few code transformations to *.cpp* files under the *lib* directory. These transformations are related to the use of `Token::Match()` function and are intended to improve code performance. The transformed files are saved on the *build* directory. This tool is silently used when building the code with `SRCDIR=build`, that is:
@@ -63,7 +49,7 @@ void f2() {
 ```
 From this we can see that the usage of `Token::Match()` in `f1()` has been optimized, whereas the one in `f2()` couldn't be optimized (the string wasn't inline on the `Token::Match()` call). **The developer doesn't need to use this tool during development but should be aware of these optimizations**. *Building with this optimization, cppcheck can get a boost of 2x of speed-up.*
 
-### * tools/dmake.cpp
+### * tools/dmake/dmake.cpp
 
 Automatically generates the main `Makefile` for Cppcheck (**the main `Makefile` should not be modified manually**). To build and run the `dmake` tool execute:
 ```shell
@@ -85,7 +71,7 @@ Script to donate CPU time to Cppcheck project by checking current Debian package
 
 ### * tools/test-my-pr.py
 
-Script to compare result of working Cppcheck from your branch with master branch.
+Script to compare result of working Cppcheck from your branch with main branch.
 
 ### * tools/triage
 

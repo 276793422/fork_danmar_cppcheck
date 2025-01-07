@@ -1,30 +1,32 @@
 /*
-* Cppcheck - A tool for static C/C++ code analysis
-* Copyright (C) 2007-2019 Cppcheck team.
-*
-* This program is free software: you can redistribute it and/or modify
-* it under the terms of the GNU General Public License as published by
-* the Free Software Foundation, either version 3 of the License, or
-* (at your option) any later version.
-*
-* This program is distributed in the hope that it will be useful,
-* but WITHOUT ANY WARRANTY; without even the implied warranty of
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-* GNU General Public License for more details.
-*
-* You should have received a copy of the GNU General Public License
-* along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
+ * Cppcheck - A tool for static C/C++ code analysis
+ * Copyright (C) 2007-2024 Cppcheck team.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 
 #include "analyzerinfo.h"
 
+#include "errorlogger.h"
+#include "filesettings.h"
 #include "path.h"
 #include "utils.h"
 
-#include <tinyxml2.h>
 #include <cstring>
 #include <map>
-#include <sstream>
+
+#include "xml.h"
 
 AnalyzerInformation::~AnalyzerInformation()
 {
@@ -43,7 +45,7 @@ static std::string getFilename(const std::string &fullpath)
     return fullpath.substr(pos1,pos2);
 }
 
-void AnalyzerInformation::writeFilesTxt(const std::string &buildDir, const std::list<std::string> &sourcefiles, const std::list<ImportProject::FileSettings> &fileSettings)
+void AnalyzerInformation::writeFilesTxt(const std::string &buildDir, const std::list<std::string> &sourcefiles, const std::string &userDefines, const std::list<FileSettings> &fileSettings)
 {
     std::map<std::string, unsigned int> fileCount;
 
@@ -51,19 +53,15 @@ void AnalyzerInformation::writeFilesTxt(const std::string &buildDir, const std::
     std::ofstream fout(filesTxt);
     for (const std::string &f : sourcefiles) {
         const std::string afile = getFilename(f);
-        fout << afile << ".a" << (++fileCount[afile]) << "::" << Path::simplifyPath(Path::fromNativeSeparators(f)) << '\n';
+        fout << afile << ".a" << (++fileCount[afile]) << "::" << Path::simplifyPath(f) << '\n';
+        if (!userDefines.empty())
+            fout << afile << ".a" << (++fileCount[afile]) << ":" << userDefines << ":" << Path::simplifyPath(f) << '\n';
     }
 
-    for (const ImportProject::FileSettings &fs : fileSettings) {
-        const std::string afile = getFilename(fs.filename);
-        fout << afile << ".a" << (++fileCount[afile]) << ":" << fs.cfg << ":" << Path::simplifyPath(Path::fromNativeSeparators(fs.filename)) << std::endl;
+    for (const FileSettings &fs : fileSettings) {
+        const std::string afile = getFilename(fs.filename());
+        fout << afile << ".a" << (++fileCount[afile]) << ":" << fs.cfg << ":" << Path::simplifyPath(fs.filename()) << std::endl;
     }
-
-    std::ofstream fc(buildDir + "/__temp__.c");
-    fc << "int x;\n";
-
-    std::ofstream fcpp(buildDir + "/__temp__.cpp");
-    fcpp << "int x;\n";
 }
 
 void AnalyzerInformation::close()
@@ -75,7 +73,7 @@ void AnalyzerInformation::close()
     }
 }
 
-static bool skipAnalysis(const std::string &analyzerInfoFile, unsigned long long checksum, std::list<ErrorLogger::ErrorMessage> *errors)
+static bool skipAnalysis(const std::string &analyzerInfoFile, std::size_t hash, std::list<ErrorMessage> &errors)
 {
     tinyxml2::XMLDocument doc;
     const tinyxml2::XMLError error = doc.LoadFile(analyzerInfoFile.c_str());
@@ -86,49 +84,51 @@ static bool skipAnalysis(const std::string &analyzerInfoFile, unsigned long long
     if (rootNode == nullptr)
         return false;
 
-    const char *attr = rootNode->Attribute("checksum");
-    if (!attr || attr != std::to_string(checksum))
+    const char *attr = rootNode->Attribute("hash");
+    if (!attr || attr != std::to_string(hash))
         return false;
 
     for (const tinyxml2::XMLElement *e = rootNode->FirstChildElement(); e; e = e->NextSiblingElement()) {
         if (std::strcmp(e->Name(), "error") == 0)
-            errors->emplace_back(e);
+            errors.emplace_back(e);
     }
 
     return true;
 }
 
-std::string AnalyzerInformation::getAnalyzerInfoFile(const std::string &buildDir, const std::string &sourcefile, const std::string &cfg)
+std::string AnalyzerInformation::getAnalyzerInfoFileFromFilesTxt(std::istream& filesTxt, const std::string &sourcefile, const std::string &cfg)
 {
-    const std::string files(buildDir + "/files.txt");
-    std::ifstream fin(files);
-    if (fin.is_open()) {
-        std::string line;
-        const std::string end(':' + cfg + ':' + sourcefile);
-        while (std::getline(fin,line)) {
-            if (line.size() <= end.size() + 2U)
-                continue;
-            if (!endsWith(line, end.c_str(), end.size()))
-                continue;
-            std::ostringstream ostr;
-            ostr << buildDir << '/' << line.substr(0,line.find(':'));
-            return ostr.str();
-        }
+    std::string line;
+    const std::string end(':' + cfg + ':' + Path::simplifyPath(sourcefile));
+    while (std::getline(filesTxt,line)) {
+        if (line.size() <= end.size() + 2U)
+            continue;
+        if (!endsWith(line, end.c_str(), end.size()))
+            continue;
+        return line.substr(0,line.find(':'));
     }
-
-    std::string filename = Path::fromNativeSeparators(buildDir);
-    if (!endsWith(filename, '/'))
-        filename += '/';
-    const std::string::size_type pos = sourcefile.rfind('/');
-    if (pos == std::string::npos)
-        filename += sourcefile;
-    else
-        filename += sourcefile.substr(pos+1);
-    filename += ".analyzerinfo";
-    return filename;
+    return "";
 }
 
-bool AnalyzerInformation::analyzeFile(const std::string &buildDir, const std::string &sourcefile, const std::string &cfg, unsigned long long checksum, std::list<ErrorLogger::ErrorMessage> *errors)
+std::string AnalyzerInformation::getAnalyzerInfoFile(const std::string &buildDir, const std::string &sourcefile, const std::string &cfg)
+{
+    std::ifstream fin(Path::join(buildDir, "files.txt"));
+    if (fin.is_open()) {
+        const std::string& ret = getAnalyzerInfoFileFromFilesTxt(fin, sourcefile, cfg);
+        if (!ret.empty())
+            return Path::join(buildDir, ret);
+    }
+
+    const std::string::size_type pos = sourcefile.rfind('/');
+    std::string filename;
+    if (pos == std::string::npos)
+        filename = sourcefile;
+    else
+        filename = sourcefile.substr(pos + 1);
+    return Path::join(buildDir, filename) + ".analyzerinfo";
+}
+
+bool AnalyzerInformation::analyzeFile(const std::string &buildDir, const std::string &sourcefile, const std::string &cfg, std::size_t hash, std::list<ErrorMessage> &errors)
 {
     if (buildDir.empty() || sourcefile.empty())
         return true;
@@ -136,13 +136,13 @@ bool AnalyzerInformation::analyzeFile(const std::string &buildDir, const std::st
 
     mAnalyzerInfoFile = AnalyzerInformation::getAnalyzerInfoFile(buildDir,sourcefile,cfg);
 
-    if (skipAnalysis(mAnalyzerInfoFile, checksum, errors))
+    if (skipAnalysis(mAnalyzerInfoFile, hash, errors))
         return false;
 
     mOutputStream.open(mAnalyzerInfoFile);
     if (mOutputStream.is_open()) {
         mOutputStream << "<?xml version=\"1.0\"?>\n";
-        mOutputStream << "<analyzerinfo checksum=\"" << checksum << "\">\n";
+        mOutputStream << "<analyzerinfo hash=\"" << hash << "\">\n";
     } else {
         mAnalyzerInfoFile.clear();
     }
@@ -150,7 +150,7 @@ bool AnalyzerInformation::analyzeFile(const std::string &buildDir, const std::st
     return true;
 }
 
-void AnalyzerInformation::reportErr(const ErrorLogger::ErrorMessage &msg, bool /*verbose*/)
+void AnalyzerInformation::reportErr(const ErrorMessage &msg)
 {
     if (mOutputStream.is_open())
         mOutputStream << msg.toXML() << '\n';

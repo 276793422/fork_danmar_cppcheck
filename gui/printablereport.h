@@ -1,6 +1,6 @@
-/*
+/* -*- C++ -*-
  * Cppcheck - A tool for static C/C++ code analysis
- * Copyright (C) 2007-2018 Cppcheck team.
+ * Copyright (C) 2007-2024 Cppcheck team.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,51 +21,52 @@
 
 #include "report.h"
 
+#include <QString>
+
 /// @addtogroup GUI
 /// @{
 
 
 /**
-* @brief Printable (in-memory) report.
-* This report formats results and exposes them for printing.
-*/
+ * @brief Printable (in-memory) report.
+ * This report formats results and exposes them for printing.
+ */
 class PrintableReport : public Report {
 public:
     PrintableReport();
-    virtual ~PrintableReport();
 
     /**
-    * @brief Create the report (file).
-    * @return true if succeeded, false if file could not be created.
-    */
-    virtual bool create() override;
+     * @brief Create the report (file).
+     * @return true if succeeded, false if file could not be created.
+     */
+    bool create() override;
 
     /**
-    * @brief Write report header.
-    */
-    virtual void writeHeader() override;
+     * @brief Write report header.
+     */
+    void writeHeader() override;
 
     /**
-    * @brief Write report footer.
-    */
-    virtual void writeFooter() override;
+     * @brief Write report footer.
+     */
+    void writeFooter() override;
 
     /**
-    * @brief Write error to report.
-    * @param error Error data.
-    */
-    virtual void writeError(const ErrorItem &error) override;
+     * @brief Write error to report.
+     * @param error Error data.
+     */
+    void writeError(const ErrorItem &error) override;
 
     /**
-    * @brief Returns the formatted report.
-    */
-    QString getFormattedReportText() const;
+     * @brief Returns the formatted report.
+     */
+    const QString& getFormattedReportText() const;
 
 private:
 
     /**
-    * @brief Stores the formatted report contents.
-    */
+     * @brief Stores the formatted report contents.
+     */
     QString mFormattedReport;
 };
 /// @}
